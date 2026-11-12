@@ -119,13 +119,29 @@ const busy = async (btn, fn) => {
 
 function openModal(...content) {
   const body = $('#modal-body');
-  put(body, closeBar(), content);
-  titleModal(body);
+  frame(body, content);
   const m = $('#modal');
   if (!m.open) m.showModal();
   return body;
 }
-const closeBar = () => h('div', { class: 'modal-close' }, h('button', { class: 'sm', onclick: closeModal, 'aria-label': 'Fechar janela' }, 'Fechar'));
+/**
+ * Monta a janela: o primeiro título (e a linha .sub logo depois dele) vai para o cabeçalho, com o botão de
+ * fechar; o resto rola embaixo.
+ */
+function frame(body, ...content) {
+  const kids = content.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false && k !== '');
+  const i = kids.findIndex((k) => k instanceof Element && /^H[12]$/.test(k.tagName));
+  const heading = i >= 0 ? kids[i] : null;
+  const sub = heading && kids[i + 1] instanceof Element && kids[i + 1].classList.contains('sub') ? kids[i + 1] : null;
+  const rest = kids.filter((k) => k !== heading && k !== sub);
+  put(body,
+    h('header', { class: 'modal-head' },
+      h('div', { class: 'modal-titles' }, heading, sub),
+      h('button', { type: 'button', class: 'icon-btn', onclick: closeModal, 'aria-label': 'Fechar janela', title: 'Fechar (Esc)' }, ic('times'))),
+    h('div', { class: 'modal-content' }, rest));
+  titleModal(body);
+  body.querySelector('.modal-content').scrollTop = 0;
+}
 /** O primeiro título da janela vira o nome dela para leitor de tela. */
 function titleModal(body) {
   const old = $('#modal-title');
@@ -371,7 +387,8 @@ async function credentialForm(c, reload) {
       if (ok(r)) { closeModal(); toast(editing ? 'Credencial alterada' : 'Credencial criada'); S.v1 = null; reload(); } else put(out, errorBox(r));
     });
   };
-  openModal(h('h2', {}, editing ? 'Editar credencial' : 'Nova credencial'),
+  openModal(title(editing ? 'pencil' : 'plus', editing ? 'Editar credencial' : 'Nova credencial'),
+    h('div', { class: 'sub' }, 'Os campos mudam conforme o parceiro escolhido.'),
     h('form', { class: 'stack', onsubmit: submit },
       h('div', { class: 'grid' }, field('Parceiro', supplier), field('Ambiente', env), field('Nome', name), editing ? field('Estado', status) : null),
       h('h3', {}, ic('list'), ' Campos do parceiro'), fieldsBox,
@@ -424,7 +441,7 @@ function showSecret(key) {
     toast('Esta tela agora usa a chave "' + key.name + '"');
     closeModal();
   });
-  openModal(h('h2', {}, 'Chave criada: ' + key.name),
+  openModal(title('key', 'Chave criada: ' + key.name),
     h('div', { class: 'alert amber' }, 'O valor aparece só agora. Copie e guarde; o Connect grava só o hash.'),
     h('div', { class: 'secret' }, key.secret),
     h('div', { class: 'row', style: 'margin-top:12px' },
@@ -487,7 +504,8 @@ async function keyForm(reload) {
       if (ok(r)) { showSecret(r.body); reload(); } else put(out, errorBox(r));
     });
   };
-  openModal(h('h2', {}, 'Nova chave de produto'),
+  openModal(title('key', 'Nova chave de produto'),
+    h('div', { class: 'sub' }, 'Negado por padrão: a chave só faz o que as permissões abaixo liberam.'),
     h('form', { class: 'stack', onsubmit: submit },
       h('div', { class: 'grid' }, field('Nome', name), field('Ambiente', env), field('IPs permitidos', ips), field('Validade', expires)),
       h('div', { class: 'head' }, h('h3', {}, ic('shield'), ' Permissões'), h('button', { type: 'button', class: 'sm', onclick: () => addRow() }, 'Mais uma')),
@@ -755,7 +773,7 @@ async function hotelDetails(id) {
   const loc = ht.location;
   openModal(
     title('building', ht.name, ' ', stars(ht.rating)),
-    h('div', { class: 'muted' }, [a.line, a.postal_code, a.city, a.country].filter(Boolean).join(', ')),
+    h('div', { class: 'sub' }, ic('map-marker'), ' ', [a.line, a.postal_code, a.city, a.country].filter(Boolean).join(', ')),
     h('div', { class: 'split', style: 'margin-top:12px' },
       h('dl', { class: 'kv' },
         h('dt', {}, 'hotel_id'), h('dd', { class: 'mono' }, ht.id),
@@ -789,7 +807,7 @@ async function quote(rateToken, hotelResult) {
   const o = q.offer;
   openModal(
     title('calculator', 'Cotação · ', ht ? ht.name : o.supplier_hotel_id),
-    h('div', { class: 'row', style: 'align-items:center' }, h('span', { class: 'muted small' }, q.integration + ' · ' + q.credential + ' · offer_token vale até ' + when(o.expires_at)), callChip(r, 'cotação')),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', q.integration + ' · ' + q.credential), h('span', {}, ic('clock'), ' offer_token vale até ' + when(o.expires_at)), callChip(r, 'cotação')),
     changesBox(q.changes),
     noticesBox(o.notices),
     offerBox(o),
@@ -921,9 +939,9 @@ function drawBooking(body, b, raw, note) {
   } else {
     actions.append(h('div', { class: 'row' }, h('button', { onclick: retrieve }, 'Consultar de novo')));
   }
-  put(body,
-    closeBar(),
+  frame(body,
     title('calendar', 'Reserva ', badge(b.status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, b.locator) : ''),
+    h('div', { class: 'sub' }, h('span', {}, ic('building'), ' ', ht ? ht.name : (b.supplier_hotel_id || '')), h('span', {}, ic('calendar'), ' ', day(b.check_in) + ' → ' + day(b.check_out)), h('span', {}, ic('link'), ' ', b.integration)),
     note ? h('div', { class: 'alert blue' }, note) : '',
     warnings.map((w) => h('div', { class: 'alert amber' }, h('strong', {}, w.code), w.offer ? ' — preço agora ' + money(w.offer.rate && w.offer.rate.net) : '')),
     h('div', { class: 'split' },
