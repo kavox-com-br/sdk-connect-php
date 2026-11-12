@@ -110,6 +110,10 @@ $old = $api->supplierBooking('ehtl', locator: '7ff42a70-097c-4cab-9450-5c62cb289
 `supplierBooking` pede a permissão `supplier_bookings` na chave, separada de `retrieve`: sem ela, a resposta
 é `403 OPERATION_NOT_ALLOWED`.
 
+Cada tarifa pode trazer `promotions[]`: a etiqueta que o parceiro deu à promoção (`type`, `name`, às vezes
+`code`, `description` e `amount`). É só para exibir: o `net` já é o valor do parceiro e nada muda por causa
+dela. A tela mostra a etiqueta embaixo do nome do quarto.
+
 `GET /v1/integrations` diz o que cada parceiro faz em `capabilities.hotel`: `supplier_catalog`,
 `supplier_destination_search` e `supplier_bookings`.
 

@@ -827,7 +827,7 @@ function hotelCard(x, integration) {
     h('div', { class: 'tablewrap' }, h('table', { class: 'rates' },
       h('thead', {}, h('tr', {}, ['Quarto', 'Regime', 'Total net', 'Cancelamento', 'Taxas', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, x.rates.map((r) => h('tr', {},
-        h('td', {}, r.room_name, r.bed_description ? h('div', { class: 'muted small' }, r.bed_description) : null),
+        h('td', {}, r.room_name, r.bed_description ? h('div', { class: 'muted small' }, r.bed_description) : null, promoTags(r)),
         h('td', {}, BOARDS[r.board] || r.board, r.board_name ? h('div', { class: 'muted small' }, r.board_name) : null),
         h('td', { class: 'net nowrap' }, money(r.net), r.payable ? h('div', { class: 'muted small' }, 'a pagar ' + money(r.payable)) : null, r.commission ? h('div', { class: 'small' }, badge('comissionada', 'blue')) : null),
         h('td', { class: 'small' }, policyText(r.cancellation_policy)),
@@ -838,6 +838,13 @@ function hotelCard(x, integration) {
 /** O símbolo da Kavox nos estados vazios. */
 const emptyMark = () => h('img', { class: 'mark', src: 'brand/icon.png', alt: '', width: 40, height: 40 });
 const placeholder = () => h('div', { class: 'ph', title: 'Sem foto no catálogo' }, h('img', { src: 'brand/icon.png', alt: '', width: 28, height: 28 }));
+
+/** As promoções da tarifa, como etiquetas: só o nome que o parceiro deu. O preço não muda por causa delas. */
+function promoTags(r) {
+  const list = (r && r.promotions) || [];
+  if (!list.length) return null;
+  return h('div', { class: 'promos' }, list.map((x) => h('span', { class: 'badge amber', title: x.description || 'Promoção informada pelo parceiro' }, ic('tag'), x.name)));
+}
 
 function policyText(p) {
   if (!p) return '—';
@@ -924,6 +931,7 @@ function offerBox(o) {
       h('dt', {}, 'Quarto'), h('dd', {}, r.room_name, r.bed_description ? ' · ' + r.bed_description : ''),
       h('dt', {}, 'Regime'), h('dd', {}, BOARDS[r.board] || r.board, r.board_name ? ' · ' + r.board_name : ''),
       h('dt', {}, 'Total net'), h('dd', {}, h('strong', {}, money(r.net))),
+      r.promotions && r.promotions.length ? [h('dt', {}, 'Promoções'), h('dd', {}, promoTags(r))] : null,
       r.payable ? [h('dt', {}, 'A pagar'), h('dd', {}, money(r.payable))] : null,
       r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount || r.commission.gross), ' ', r.commission.settlement || '')] : null,
       r.sale_price ? [h('dt', {}, 'Preço de venda'), h('dd', {}, money(r.sale_price.amount || r.sale_price), r.sale_price.binding ? ' (obrigatório)' : '')] : null,

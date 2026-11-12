@@ -146,6 +146,7 @@ tr.click:focus-visible { outline-offset: -2px; }
 .badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: var(--kc-radius-pill); font-size: var(--kc-text-2xs); font-weight: 600; background: var(--kc-surface-3); color: var(--kc-text-muted); white-space: nowrap; line-height: 1.6; }
 .badge.green { background: var(--kc-success-soft); color: var(--kc-success); } .badge.red { background: var(--kc-danger-soft); color: var(--kc-danger); }
 .badge.amber { background: var(--kc-warning-soft); color: var(--kc-warning); } .badge.blue { background: var(--kc-accent-soft); color: var(--kc-accent); }
+.promos { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; } .promos .badge { gap: 4px; white-space: normal; } .promos .pi { font-size: 0.7rem; }
 .status { font-family: var(--kc-font-mono); font-weight: 700; }
 .status.ok { color: var(--kc-success); } .status.warn { color: var(--kc-warning); } .status.err { color: var(--kc-danger); }
 .alert { padding: 10px 14px; border-radius: var(--kc-radius-sm); margin: 8px 0; font-size: var(--kc-text-sm); border-left: 3px solid currentColor; }
