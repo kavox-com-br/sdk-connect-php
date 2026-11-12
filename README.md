@@ -11,6 +11,32 @@ próprio Connect, em `/docs`.
 2. `cp .env.example .env` e preencha `KAVOX_CONNECT_URL` e `KAVOX_CONNECT_KEY` (vale também por variável de
    ambiente). **Nunca versione a chave.**
 
+## Tela de teste (HTML)
+
+```bash
+php -S localhost:8300 -t public
+```
+
+Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
+
+- **Hotel**: busca por destino (autocomplete), nome, `hotel_id`, id do GIATA ou código do parceiro; vários
+  quartos e crianças; mais de 90 hotéis viram várias buscas em paralelo. Ficha do hotel (fotos, textos,
+  comodidades), cotação (mudanças, avisos do parceiro, política e taxas) e reserva com `Idempotency-Key`.
+- **Reservas**: lista (API de gestão), consulta no parceiro e cancelamento com multa máxima.
+- **Credenciais**: parceiros e credenciais da conta; criar pelo formulário que o próprio parceiro descreve
+  (`credential_schema`), editar, testar a conexão, pausar e excluir.
+- **Chaves**: chaves de produto com permissões por produto, parceiro, credencial e operação; chave de
+  desenvolvimento; a chave criada pode virar a chave da tela com um clique.
+- **Console** e a barra de baixo: toda chamada com requisição (curl pronto para copiar) e resposta como vieram,
+  status, tempo e `request_id`.
+- Com o simulador (`mock`), cada operação tem o seletor de cenário (`X-Mock-Scenario`): sem
+  disponibilidade, preço mudou, reserva pendente, multa no cancelamento, parceiro fora…
+
+As chaves ficam no servidor PHP (`public/api.php`), nunca no navegador. A tela lê `KAVOX_CONNECT_URL`,
+`KAVOX_CONNECT_KEY` e `KAVOX_CONNECT_MGMT_KEY` (chave de gestão, `kcx_mgmt_…`, criada pelo dono da conta no
+painel) do `.env`; em **Configuração** dá para trocar nesta sessão. Num servidor exposto, defina
+`KAVOX_SDK_PASSWORD`: a tela passa a pedir senha.
+
 ## Exemplo: busca pela linha de comando
 
 ```bash
@@ -47,7 +73,12 @@ $quote = $api->quote($res['results'][0]['rates'][0]['rate_token']);
 
 // reserva: gere a chave antes e guarde-a; repetir com ela nunca reserva duas vezes
 $key = Client::uuid();
-$booking = $api->book(['offer_token' => $quote['offer_token'], /* holder, rooms[].guests ... */], $key);
+$booking = $api->book(['offer_token' => $quote['offer']['offer_token'], 'rooms' => [['guests' => [
+    ['first_name' => 'Ana', 'last_name' => 'Souza'], ['first_name' => 'Rui', 'last_name' => 'Souza'],
+]]]], $key);
+
+// cancelar também leva Idempotency-Key
+$api->cancel($booking['booking']['id'], Client::uuid());
 ```
 
 O Connect não espalha a busca por parceiros nem junta respostas: cada chamada é uma integração e até 90

@@ -29,12 +29,23 @@ final class Client
         }
     }
 
-    public static function fromEnv(): self
+    /** Lê KAVOX_CONNECT_URL e a chave do ambiente ou do .env. $keyVar = KAVOX_CONNECT_MGMT_KEY dá o cliente da API de gestão. */
+    public static function fromEnv(string $keyVar = 'KAVOX_CONNECT_KEY'): self
+    {
+        $env = self::env();
+        return new self($env['KAVOX_CONNECT_URL'] ?? '', $env[$keyVar] ?? '');
+    }
+
+    /** @return array<string, string> o .env com as variáveis de ambiente por cima */
+    public static function env(): array
     {
         $env = self::loadEnvFile(dirname(__DIR__) . '/.env');
-        $url = getenv('KAVOX_CONNECT_URL') ?: ($env['KAVOX_CONNECT_URL'] ?? '');
-        $key = getenv('KAVOX_CONNECT_KEY') ?: ($env['KAVOX_CONNECT_KEY'] ?? '');
-        return new self($url, $key);
+        foreach (['KAVOX_CONNECT_URL', 'KAVOX_CONNECT_KEY', 'KAVOX_CONNECT_MGMT_KEY', 'KAVOX_SDK_PASSWORD'] as $name) {
+            if (($v = getenv($name)) !== false && $v !== '') {
+                $env[$name] = $v;
+            }
+        }
+        return $env;
     }
 
     // --- chave e integrações
@@ -180,10 +191,15 @@ final class Client
         return $this->get('/v1/hotels/bookings/' . rawurlencode($bookingId));
     }
 
-    /** @param array<string, mixed> $body ex.: ['max_penalty' => ['amount' => '0.00', 'currency' => 'BRL']] @return array<string, mixed> */
-    public function cancel(string $bookingId, array $body = []): array
+    /**
+     * Cancela no parceiro. Como na reserva, guarde a $idempotencyKey e repita com ela se a resposta não vier.
+     *
+     * @param array<string, mixed> $body ex.: ['max_penalty' => ['amount' => '0.00', 'currency' => 'BRL']]
+     * @return array<string, mixed>
+     */
+    public function cancel(string $bookingId, string $idempotencyKey, array $body = []): array
     {
-        return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/cancel', $body);
+        return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/cancel', $body, $idempotencyKey);
     }
 
     public static function uuid(): string
@@ -195,6 +211,60 @@ final class Client
     }
 
     // --- HTTP
+
+    /**
+     * Uma chamada qualquer, sem exceção: devolve o que o Connect respondeu, com status e tempo. É o que o
+     * console em public/ usa para mostrar requisição e resposta como vieram.
+     *
+     * @param array<string, scalar|null> $query
+     * @param array<string, mixed>|null $body
+     * @param array<string, string> $headers Idempotency-Key, X-Mock-Scenario, Accept-Language...
+     * @return array{status: int, duration_ms: int, request_id: ?string, server_timing: ?string, body: mixed, error?: string}
+     */
+    public function send(string $method, string $path, array $query = [], ?array $body = null, array $headers = []): array
+    {
+        $ch = $this->handle($method, $path, $query, $body, $headers['Idempotency-Key'] ?? null);
+        $extra = [];
+        foreach ($headers as $name => $value) {
+            if ($name !== 'Idempotency-Key' && $value !== '') {
+                $extra[] = $name . ': ' . $value;
+            }
+        }
+        $got = [];
+        curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge($this->headers($body !== null, $headers['Idempotency-Key'] ?? null), $extra));
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($ch, string $line) use (&$got): int {
+            if (str_contains($line, ':')) {
+                [$k, $v] = explode(':', $line, 2);
+                $got[strtolower(trim($k))] = trim($v);
+            }
+            return strlen($line);
+        });
+        $started = hrtime(true);
+        $raw = curl_exec($ch);
+        $took = (int) round((hrtime(true) - $started) / 1e6);
+        if ($raw === false) {
+            return ['status' => 0, 'duration_ms' => $took, 'request_id' => null, 'server_timing' => null, 'body' => null, 'error' => curl_error($ch)];
+        }
+        $decoded = $raw === '' ? null : json_decode((string) $raw, true);
+        return [
+            'status' => (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE),
+            'duration_ms' => $took,
+            'request_id' => $got['x-request-id'] ?? null,
+            'server_timing' => $got['server-timing'] ?? null,
+            'body' => $decoded ?? ($raw === '' ? null : (string) $raw),
+        ];
+    }
+
+    /** O começo da chave, para mostrar qual está em uso sem revelá-la. */
+    public function keyPrefix(): string
+    {
+        return substr($this->apiKey, 0, 13) . '…';
+    }
+
+    public function baseUrl(): string
+    {
+        return $this->baseUrl;
+    }
 
     /** @param array<string, scalar|null> $query @return array<string, mixed> */
     public function get(string $path, array $query = []): array
@@ -247,23 +317,29 @@ final class Client
     {
         $query = array_filter($query, static fn ($v) => $v !== null && $v !== '');
         $url = $this->baseUrl . $path . ($query ? '?' . http_build_query($query) : '');
-        $headers = ['Authorization: Bearer ' . $this->apiKey, 'Accept: application/json', 'Accept-Language: pt-BR'];
-        if ($body !== null) {
-            $headers[] = 'Content-Type: application/json';
-        }
-        if ($idempotencyKey !== null) {
-            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
-        }
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_HTTPHEADER => $this->headers($body !== null, $idempotencyKey),
             CURLOPT_TIMEOUT => $this->timeout,
             CURLOPT_ENCODING => '', // aceita gzip
-            CURLOPT_POSTFIELDS => $body !== null ? json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) : null,
+            CURLOPT_POSTFIELDS => $body !== null ? json_encode($body ?: new \stdClass(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) : null, // {} e não []
         ]);
         return $ch;
+    }
+
+    /** @return list<string> */
+    private function headers(bool $withBody, ?string $idempotencyKey): array
+    {
+        $headers = ['Authorization: Bearer ' . $this->apiKey, 'Accept: application/json', 'Accept-Language: pt-BR'];
+        if ($withBody) {
+            $headers[] = 'Content-Type: application/json';
+        }
+        if ($idempotencyKey !== null && $idempotencyKey !== '') {
+            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+        }
+        return $headers;
     }
 
     /** @return array<string, mixed> */
