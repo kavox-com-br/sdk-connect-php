@@ -1,0 +1,14 @@
+{
+    "name": "kavox/connect-sdk",
+    "description": "Cliente PHP da API de produtos do Kavox Connect (/v1): conteúdo, busca, cotação e reserva de hotel",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": { "Kavox\\Connect\\": "src/" }
+    }
+}
