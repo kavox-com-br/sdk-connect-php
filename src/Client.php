@@ -8,14 +8,16 @@ namespace Kavox\Connect;
  * Cliente da API de produtos do Kavox Connect (/v1). A documentação completa fica no próprio Connect, em /docs.
  *
  * - Autenticação: Authorization: Bearer kcx_test_… (sandbox) ou kcx_live_… (produção).
- * - Uma busca é uma integração e até 90 hotéis. Vários parceiros = várias chamadas, em paralelo (searchMany).
+ * - Uma busca é uma integração e uma lista de hotéis, sem máximo. Vários parceiros = várias chamadas, em
+ *   paralelo (searchMany).
+ * - Parceiro fora do GIATA (capabilities.hotel.supplier_catalog): os destinos e os hotéis são os do próprio
+ *   parceiro (supplierDestinations, supplierHotels) e a busca vai por supplier_hotel_ids ou
+ *   supplier_destination_id.
  * - Reserva leva Idempotency-Key: repetir com a mesma chave nunca reserva duas vezes.
  * - Listas paginam por cursor: {"...": [...], "next_cursor": "…"}; next_cursor ausente = última página.
  */
 final class Client
 {
-    public const MAX_HOTELS = 90;
-
     private string $baseUrl;
 
     public function __construct(string $baseUrl, private readonly string $apiKey, private readonly int $timeout = 40)
@@ -105,13 +107,49 @@ final class Client
         return $this->get('/v1/content/destinations', ['q' => $q]);
     }
 
+    // --- catálogo do próprio parceiro (para parceiro fora do GIATA)
+
+    /**
+     * Os destinos do catálogo do PRÓPRIO parceiro cujo nome contém $q. O id de cada um só vale naquele
+     * parceiro: serve a supplierHotels e a ['supplier_destination_id' => id] na busca.
+     *
+     * @return array<string, mixed> {destinations: [{id, name, region, country}]}
+     */
+    public function supplierDestinations(string $integration, string $q, ?int $limit = null, ?string $credential = null): array
+    {
+        return $this->get('/v1/hotels/supplier-destinations', ['integration' => $integration, 'credential' => $credential, 'q' => $q, 'limit' => $limit]);
+    }
+
+    /**
+     * Uma página dos hotéis do catálogo do PRÓPRIO parceiro: os de um destino dele, os que têm $name no nome,
+     * ou os dois. Cada hotel traz supplier_hotel_id (o que a busca recebe em supplier_hotel_ids).
+     *
+     * @return array<string, mixed> {hotels: [...], page, pages, total}
+     */
+    public function supplierHotels(string $integration, ?string $destinationId = null, ?string $name = null, int $page = 1, ?string $credential = null): array
+    {
+        return $this->get('/v1/hotels/supplier-hotels', ['integration' => $integration, 'credential' => $credential, 'destination_id' => $destinationId, 'name' => $name, 'page' => $page]);
+    }
+
+    /**
+     * Uma reserva lida direto no parceiro, pelo id dela lá ($locator) ou pela referência com que foi feita:
+     * para a reserva que não passou pelo Connect. Só leitura; nada é guardado no Connect.
+     *
+     * @return array<string, mixed> {booking: {...}}
+     */
+    public function supplierBooking(string $integration, ?string $locator = null, ?string $reference = null, ?string $credential = null): array
+    {
+        return $this->get('/v1/hotels/supplier-bookings', ['integration' => $integration, 'credential' => $credential, 'locator' => $locator, 'reference' => $reference]);
+    }
+
     // --- hotel
 
     /**
-     * Busca de tarifas numa integração. $hotels identifica os hotéis de um dos três jeitos:
-     * ['hotel_ids' => [...]], ['giata_hotel_ids' => [...]] ou ['supplier_hotel_ids' => [...]].
+     * Busca de tarifas numa integração. $hotels identifica os hotéis de um dos quatro jeitos:
+     * ['hotel_ids' => [...]], ['giata_hotel_ids' => [...]], ['supplier_hotel_ids' => [...]] ou
+     * ['supplier_destination_id' => '…'] (um destino do próprio parceiro, de supplierDestinations).
      *
-     * @param array<string, list<string|int>> $hotels
+     * @param array<string, list<string|int>|string> $hotels
      * @param list<array{adults: int, children_ages?: list<int>}> $rooms
      * @param array<string, mixed> $options credential, currency, guest_country, max_rates_per_hotel
      * @return array<string, mixed>
@@ -122,23 +160,20 @@ final class Client
     }
 
     /**
-     * Várias buscas ao mesmo tempo: uma por integração e por lote de até 90 hotéis. O Connect não espalha
-     * a busca; quem consome paraleliza. Uma busca que falha não derruba as outras: vem em "error".
+     * Várias buscas ao mesmo tempo: uma por integração. O Connect não espalha a busca; quem consome
+     * paraleliza. Uma busca que falha não derruba as outras: vem em "error".
      *
      * @param list<string> $integrations
-     * @param array<string, list<string|int>> $hotels
+     * @param array<string, list<string|int>|string> $hotels
      * @param list<array{adults: int, children_ages?: list<int>}> $rooms
      * @param array<string, mixed> $options
      * @return list<array{integration: string, response?: array<string, mixed>, error?: ApiException}>
      */
     public function searchMany(array $integrations, array $hotels, string $checkIn, string $checkOut, array $rooms, array $options = []): array
     {
-        $kind = array_key_first($hotels);
         $calls = [];
         foreach ($integrations as $integration) {
-            foreach (array_chunk($hotels[$kind] ?? [], self::MAX_HOTELS) as $chunk) {
-                $calls[] = [$integration, $this->searchBody($integration, [$kind => $chunk], $checkIn, $checkOut, $rooms, $options)];
-            }
+            $calls[] = [$integration, $this->searchBody($integration, $hotels, $checkIn, $checkOut, $rooms, $options)];
         }
         $multi = curl_multi_init();
         $handles = [];
@@ -286,9 +321,9 @@ final class Client
      */
     private function searchBody(string $integration, array $hotels, string $checkIn, string $checkOut, array $rooms, array $options): array
     {
-        $kinds = array_intersect_key($hotels, array_flip(['hotel_ids', 'giata_hotel_ids', 'supplier_hotel_ids']));
+        $kinds = array_intersect_key($hotels, array_flip(['hotel_ids', 'giata_hotel_ids', 'supplier_hotel_ids', 'supplier_destination_id']));
         if (count($kinds) !== 1 || count($hotels) !== 1) {
-            throw new \InvalidArgumentException('informe só um entre hotel_ids, giata_hotel_ids e supplier_hotel_ids');
+            throw new \InvalidArgumentException('informe só um entre hotel_ids, giata_hotel_ids, supplier_hotel_ids e supplier_destination_id');
         }
         return ['integration' => $integration] + $kinds + ['check_in' => $checkIn, 'check_out' => $checkOut, 'rooms' => $rooms]
             + array_filter($options, static fn ($v) => $v !== null && $v !== '');

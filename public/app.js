@@ -11,11 +11,10 @@ const SCENARIOS = {
   retrieve: ['ok', 'credential', 'unavailable', 'timeout', 'slow'],
   cancel: ['ok', 'validation', 'cancel_penalty', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
 };
-const MAX_HOTELS = 90;
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
 const STATUS_TONE = { active: 'green', confirmed: 'green', ok: 'green', paused: 'amber', pending: 'amber', needs_review: 'amber', invalid: 'red', failed: 'red', revoked: 'red', cancelled: '', expired: 'red' };
 
-const S = { log: [], cfg: null, me: null, v1: null, products: null, suppliers: null, schemas: {}, facts: null, hotels: {}, hotel: null };
+const S = { partnerHotels: {}, log: [], cfg: null, me: null, v1: null, products: null, suppliers: null, schemas: {}, facts: null, hotels: {}, hotel: null };
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -67,7 +66,7 @@ const day = (s) => (s ? new Date(s + 'T12:00:00').toLocaleDateString('pt-BR', { 
 const iso = (d) => d.toISOString().slice(0, 10);
 const uuid = () => crypto.randomUUID();
 const list = (text) => String(text || '').split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
-const chunk = (items, size) => Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, i * size + size));
+const chunk = (items, size) => Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
 
 // ---------- chamadas ----------
 
@@ -517,8 +516,8 @@ async function keyForm(reload) {
 function hotelState() {
   if (!S.hotel) {
     const inDays = new Date(Date.now() + 30 * 864e5);
-    S.hotel = { mode: 'destination', dest: null, q: '', ids: '', integration: '', credential: '', checkIn: iso(inDays), nights: 2,
-      rooms: [{ adults: 2, children: '' }], currency: '', country: '', rates: 5, max: 90, scenario: 'ok', quoteScenario: 'ok', result: null, filter: '', sort: 'supplier' };
+    S.hotel = { mode: 'destination', dest: null, sdest: null, q: '', ids: '', integration: '', credential: '', checkIn: iso(inDays), nights: 2,
+      rooms: [{ adults: 2, children: '' }], currency: '', country: '', rates: 5, max: 500, scenario: 'ok', quoteScenario: 'ok', result: null, filter: '', sort: 'supplier' };
   }
   return S.hotel;
 }
@@ -541,16 +540,23 @@ async function viewHotel() {
     put(capsBox, caps ? h('div', { class: 'small muted' }, 'Capacidades: ', Object.entries(caps).map(([k, v]) => h('span', {}, ' ', badge((v === true ? '✓ ' : v === false ? '✕ ' : '') + k + (typeof v === 'boolean' ? '' : ': ' + v), v === true ? 'green' : v === false ? 'red' : 'blue')))) : '');
   };
   const capsBox = h('div');
-  integration.addEventListener('change', fillCreds);
+  integration.addEventListener('change', () => { fillCreds(); st.sdest = null; drawHotels(); });
   credential.addEventListener('change', () => { st.credential = credential.value; });
 
   // hotéis
-  const modes = [['destination', 'Destino'], ['name', 'Nome'], ['hotel_ids', 'hotel_id'], ['giata_hotel_ids', 'GIATA'], ['supplier_hotel_ids', 'Código do parceiro']];
+  const modes = [['destination', 'Destino'], ['name', 'Nome'], ['hotel_ids', 'hotel_id'], ['giata_hotel_ids', 'GIATA'], ['supplier_hotel_ids', 'Código do parceiro'], ['supplier_destination_id', 'Destino do parceiro']];
+  const capsOf = () => { const it = ints.find((i) => i.integration === st.integration); return (it && it.capabilities && it.capabilities.hotel) || {}; };
   const hotelsBox = h('div');
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Identificar hotéis por' }, modes.map(([m, label]) => h('button', { type: 'button', 'aria-pressed': String(st.mode === m), onclick: () => { st.mode = m; drawHotels(); } }, label)));
   const drawHotels = () => {
     seg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(modes[i][0] === st.mode)));
     if (st.mode === 'destination') put(hotelsBox, h('div', { class: 'row' }, destinationInput(st), field('Máx. de hotéis', numberInput(st, 'max', 1, 2000))));
+    else if (st.mode === 'supplier_destination_id') put(hotelsBox, capsOf().supplier_catalog
+      ? h('div', { class: 'stack' },
+        h('div', { class: 'row' }, supplierDestinationInput(st),
+          h('button', { type: 'button', onclick: () => { if (st.sdest) supplierHotelsModal(st, () => { st.mode = 'supplier_hotel_ids'; drawHotels(); }); else toast('Escolha um destino do parceiro'); } }, ic('list'), 'Ver hotéis do parceiro neste destino')),
+        h('p', { class: 'small muted' }, 'Destinos do catálogo do próprio parceiro (GET /v1/hotels/supplier-destinations), para parceiro fora do GIATA. O id só vale em ', h('strong', {}, st.integration), ': a busca manda supplier_destination_id.'))
+      : h('div', { class: 'alert amber' }, ic('info-circle'), ' ', h('strong', {}, st.integration || 'esta integração'), ' não tem catálogo próprio para ler (capabilities.hotel.supplier_catalog). Use Destino, que vem do conteúdo do Connect.'));
     else if (st.mode === 'name') put(hotelsBox, h('div', { class: 'row' }, field('Nome do hotel (mín. 2 letras)', h('input', { value: st.q, oninput: (e) => { st.q = e.target.value; } })), field('Máx. de hotéis', numberInput(st, 'max', 1, 2000))));
     else put(hotelsBox, field(st.mode === 'giata_hotel_ids' ? 'Ids do GIATA (vírgula ou linha)' : st.mode === 'hotel_ids' ? 'hotel_id do catálogo (vírgula ou linha)' : 'Códigos do hotel no parceiro', h('textarea', { rows: 3, name: 'ids', spellcheck: 'false', autocomplete: 'off', translate: 'no', placeholder: st.mode === 'giata_hotel_ids' ? '10746, 527606…' : 'um por linha ou separados por vírgula…', oninput: (e) => { st.ids = e.target.value; } }, st.ids)));
   };
@@ -573,7 +579,7 @@ async function viewHotel() {
     await busy(e.submitter, () => runSearch(results));
   };
   const form = h('form', { class: 'card hero', onsubmit: submit },
-    h('div', { class: 'head' }, h('div', {}, title('building', 'Hotel · buscar tarifas'), h('p', { class: 'muted' }, 'POST /v1/hotels/search: uma integração e até 90 hotéis por chamada. Mais hotéis viram várias chamadas em paralelo, como o consumidor faz.'))),
+    h('div', { class: 'head' }, h('div', {}, title('building', 'Hotel · buscar tarifas'), h('p', { class: 'muted' }, 'POST /v1/hotels/search: uma integração e uma lista de hotéis, sem máximo, numa chamada só. Parceiro fora do GIATA busca pelo código ou pelo destino dele mesmo.'))),
     h('div', { class: 'stack' },
       h('div', { class: 'row' }, field('Integração', integration), field('Credencial', credential), scenarioBox),
       capsBox,
@@ -596,6 +602,76 @@ function numberInput(st, key, min, max, after) {
 }
 function scenarioSelect(op, value, set) {
   return h('select', { onchange: (e) => set(e.target.value) }, SCENARIOS[op].map((s) => opt(s, s, value === s)));
+}
+
+/** Autocomplete de GET /v1/hotels/supplier-destinations: os destinos do próprio parceiro da integração. */
+function supplierDestinationInput(st) {
+  const input = h('input', { value: st.sdest ? st.sdest.name : '', placeholder: 'Acrelândia, São Paulo…', autocomplete: 'off', name: 'supplier_destination', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': 'sdest-list', 'aria-autocomplete': 'list' });
+  const ul = h('ul', { hidden: true, id: 'sdest-list', role: 'listbox', 'aria-label': 'Destinos do parceiro' });
+  let timer = 0;
+  let items = [];
+  let active = -1;
+  const show = (open) => { ul.hidden = !open; input.setAttribute('aria-expanded', String(open)); };
+  const pick = (it) => { st.sdest = it; input.value = it.name; show(false); };
+  const mark = () => ul.querySelectorAll('li').forEach((li, i) => li.setAttribute('aria-selected', String(i === active)));
+  input.addEventListener('keydown', (e) => {
+    if (ul.hidden || !items.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      mark();
+    } else if (e.key === 'Enter' && active >= 0) {
+      e.preventDefault();
+      pick(items[active]);
+    } else if (e.key === 'Escape') show(false);
+  });
+  input.addEventListener('input', () => {
+    st.sdest = null;
+    clearTimeout(timer);
+    if (input.value.trim().length < 2) { show(false); return; }
+    timer = setTimeout(async () => {
+      const r = await api('GET', '/v1/hotels/supplier-destinations', { query: { integration: st.integration, credential: st.credential || undefined, q: input.value.trim(), limit: 15 }, label: 'destinos do parceiro' });
+      items = (ok(r) && r.body.destinations) || [];
+      active = -1;
+      if (!ok(r)) { put(ul, h('li', { class: 'muted small' }, (r.body && r.body.error && r.body.error.code) || 'falhou')); show(true); return; }
+      put(ul, ...items.map((it) => h('li', { role: 'option', 'aria-selected': 'false', onmousedown: (e) => { e.preventDefault(); pick(it); } },
+        badge(st.integration, 'blue'), ' ', h('strong', {}, it.name), h('span', { class: 'muted small' }, ' ' + [it.region, it.country].filter(Boolean).join(', ')),
+        h('span', { class: 'mono small muted' }, ' ' + it.id))));
+      show(items.length > 0);
+    }, 300);
+  });
+  input.addEventListener('blur', () => setTimeout(() => show(false), 150));
+  return field('Destino no parceiro', h('div', { class: 'suggest' }, input, ul));
+}
+
+/** Os hotéis do parceiro num destino dele (GET /v1/hotels/supplier-hotels), página a página. */
+async function supplierHotels(st, destinationId, maxPages) {
+  const out = [];
+  let pages = 1;
+  for (let page = 1; page <= pages && page <= maxPages; page++) {
+    const r = await api('GET', '/v1/hotels/supplier-hotels', { query: { integration: st.integration, credential: st.credential || undefined, destination_id: destinationId, page }, label: 'hotéis do parceiro' });
+    if (!ok(r)) throw r;
+    out.push(...r.body.hotels);
+    pages = r.body.pages || 1;
+  }
+  for (const ht of out) S.partnerHotels[st.integration + '/' + ht.supplier_hotel_id] = ht;
+  return out;
+}
+
+async function supplierHotelsModal(st, use) {
+  openModal(h('h2', {}, 'Hotéis de ' + st.sdest.name + ' em ' + st.integration), h('p', { class: 'sub' }, 'Catálogo do próprio parceiro · GET /v1/hotels/supplier-hotels'), h('p', { class: 'muted' }, 'Carregando…'));
+  let hotels;
+  try { hotels = await supplierHotels(st, st.sdest.id, 10); } catch (err) { openModal(errorBox(err, 'Hotéis do parceiro')); return; }
+  openModal(h('h2', {}, 'Hotéis de ' + st.sdest.name + ' em ' + st.integration),
+    h('p', { class: 'sub' }, h('span', {}, ic('building'), ' ', hotels.length + ' hotéis no catálogo do parceiro'), h('span', {}, ic('link'), ' GET /v1/hotels/supplier-hotels')),
+    hotels.length ? h('div', { class: 'tablewrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Hotel', 'Endereço', 'Código no parceiro', 'hotel_id do Connect'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, hotels.map((ht) => h('tr', {},
+        h('td', {}, h('strong', {}, ht.name || '—'), ' ', stars(ht.stars)),
+        h('td', { class: 'small' }, [ht.address, ht.city].filter(Boolean).join(' · ')),
+        h('td', { class: 'mono small', translate: 'no' }, ht.supplier_hotel_id),
+        h('td', { class: 'mono small' }, ht.hotel_id || h('span', { class: 'muted' }, 'sem vínculo'))))))) : h('div', { class: 'empty' }, emptyMark(), 'O parceiro não tem hotel neste destino.'),
+    h('div', { class: 'row' }, h('button', { class: 'primary', disabled: !hotels.length, onclick: () => { st.ids = hotels.map((x) => x.supplier_hotel_id).join('\n'); closeModal(); use(); toast('Códigos copiados para a busca'); } }, ic('search'), 'Buscar por estes códigos')));
 }
 
 /** Autocomplete de /v1/content/destinations: cidade, destino ou hotel. */
@@ -663,6 +739,10 @@ async function runSearch(box) {
     } else if (st.mode === 'name') {
       kind = 'hotel_ids';
       ids = await contentIds({ q: st.q }, st.max);
+    } else if (st.mode === 'supplier_destination_id') {
+      if (!st.sdest) throw new Error('escolha um destino do parceiro na lista');
+      ids = st.sdest.id;
+      supplierHotels(st, st.sdest.id, 10).catch(() => {}); // os nomes dos hotéis do parceiro, para os cartões
     } else {
       ids = list(st.ids);
       if (kind === 'giata_hotel_ids') ids = ids.map(Number);
@@ -681,11 +761,11 @@ async function runSearch(box) {
   const headers = st.integration === 'mock' ? mockHeader(st.scenario) : {};
 
   const started = performance.now();
-  const calls = await Promise.all(chunk(ids, MAX_HOTELS).map((part, i, all) => api('POST', '/v1/hotels/search', { body: { ...base, [kind]: part }, headers, label: 'busca ' + (i + 1) + '/' + all.length })));
+  const calls = [await api('POST', '/v1/hotels/search', { body: { ...base, [kind]: ids }, headers, label: 'busca' })];
   const took = Math.round(performance.now() - started);
   const hotels = calls.flatMap((c) => (ok(c) && c.body.results) || []);
   await hotelBasics(hotels.map((x) => x.hotel_id));
-  st.result = { kind, asked: ids.length, calls, hotels, took, rooms, checkIn: st.checkIn, checkOut: iso(checkOut) };
+  st.result = { kind, integration: st.integration, asked: Array.isArray(ids) ? ids.length : hotels.length, calls, hotels, took, rooms, checkIn: st.checkIn, checkOut: iso(checkOut) };
   drawResults(box);
 }
 
@@ -699,9 +779,9 @@ function drawResults(box) {
   const draw = () => {
     let hs = res.hotels;
     const f = st.filter.trim().toLowerCase();
-    if (f) hs = hs.filter((x) => ((S.hotels[x.hotel_id] || {}).name || x.supplier_hotel_id).toLowerCase().includes(f));
+    if (f) hs = hs.filter((x) => ((S.hotels[x.hotel_id] || S.partnerHotels[res.integration + '/' + x.supplier_hotel_id] || {}).name || x.supplier_hotel_id).toLowerCase().includes(f));
     if (st.sort === 'price') hs = [...hs].sort((a, b) => Number(a.rates[0].net.amount) - Number(b.rates[0].net.amount));
-    put(listBox, ...(hs.length ? hs.map(hotelCard) : [h('div', { class: 'card empty' }, emptyMark(), 'Nenhum hotel com tarifa.')]));
+    put(listBox, ...(hs.length ? hs.map((x) => hotelCard(x, res.integration)) : [h('div', { class: 'card empty' }, emptyMark(), 'Nenhum hotel com tarifa.')]));
   };
   const sort = h('select', { onchange: (e) => { st.sort = e.target.value; draw(); } }, opt('supplier', 'ordem do parceiro', st.sort === 'supplier'), opt('price', 'menor preço', st.sort === 'price'));
   const quoteScenario = st.integration === 'mock' ? field('Cenário da cotação', scenarioSelect('quote', st.quoteScenario, (v) => { st.quoteScenario = v; })) : null;
@@ -712,7 +792,7 @@ function drawResults(box) {
         h('div', {}, h('div', { class: 'summary' },
             h('div', { class: 'metric' }, h('strong', {}, res.hotels.length), h('span', {}, 'hotéis com tarifa de ' + res.asked)),
             h('div', { class: 'metric' }, h('strong', {}, rates), h('span', {}, 'tarifas')),
-            h('div', { class: 'metric' }, h('strong', {}, res.calls.length), h('span', {}, 'chamada(s) em paralelo')),
+            h('div', { class: 'metric' }, h('strong', {}, res.calls.length), h('span', {}, 'chamada')),
             h('div', { class: 'metric' }, h('strong', {}, res.took + ' ms'), h('span', {}, 'tempo total'))),
           h('div', { class: 'muted small', style: 'margin-top:8px' }, ic('calendar'), ' ', day(res.checkIn) + ' → ' + day(res.checkOut) + ' · ' + res.rooms.length + ' quarto(s)'),
           h('div', { class: 'calls' }, res.calls.map((c, i) => callChip(c, 'chamada ' + (i + 1))))),
@@ -728,15 +808,16 @@ function drawResults(box) {
   draw();
 }
 
-function hotelCard(x) {
+function hotelCard(x, integration) {
   const ht = S.hotels[x.hotel_id];
+  const own = S.partnerHotels[integration + '/' + x.supplier_hotel_id]; // do catálogo do próprio parceiro
   const img = heroOf(ht);
-  const addr = ht && ht.address ? [ht.address.line, ht.address.city, ht.address.country].filter(Boolean).join(', ') : '';
+  const addr = ht && ht.address ? [ht.address.line, ht.address.city, ht.address.country].filter(Boolean).join(', ') : own ? [own.address, own.city].filter(Boolean).join(' · ') : '';
   return h('div', { class: 'hotel' },
     h('div', { class: 'hotel-head' },
       img ? h('img', { src: img, alt: '', width: 104, height: 78, loading: 'lazy', onerror: (e) => e.target.replaceWith(placeholder()) }) : placeholder(),
       h('div', { class: 'info' },
-        h('h2', {}, ht ? ht.name : 'Hotel fora do catálogo', ' ', stars(ht && ht.rating)),
+        h('h2', {}, ht ? ht.name : own ? own.name : 'Hotel fora do catálogo', ' ', stars(ht ? ht.rating : own && own.stars), !ht && own ? h('span', { class: 'small' }, ' ', badge('catálogo do parceiro', 'blue')) : null),
         addr ? h('div', { class: 'muted small' }, addr) : null,
         h('div', { class: 'ids', translate: 'no' },
           x.hotel_id ? h('span', { title: 'hotel_id do catálogo' }, x.hotel_id) : null,
@@ -912,8 +993,8 @@ function drawBooking(body, b, raw, note) {
   let retrieveScenario = 'ok';
   let cancelScenario = 'ok';
   const retrieve = async (e) => busy(e.target, async () => {
-    const r = await api('GET', '/v1/hotels/bookings/' + b.id, { headers: b.integration === 'mock' ? mockHeader(retrieveScenario) : {}, label: 'consultar reserva' });
-    if (ok(r)) drawBooking(body, r.body.booking || r.body, r.body, 'Lida agora no Connect' + (r.body.booking && r.body.booking.refreshed_at ? '' : '') + '.');
+    const r = await api('GET', '/v1/hotels/bookings/' + b.id, { query: { refresh: 'true' }, headers: b.integration === 'mock' ? mockHeader(retrieveScenario) : {}, label: 'consultar no parceiro' });
+    if (ok(r)) drawBooking(body, r.body.booking || r.body, r.body, 'Consultada agora no parceiro (?refresh=true): estado e número de confirmação atualizados.');
     else put(out, errorBox(r, 'Consulta'));
   });
   const penalty = h('input', { placeholder: 'ex.: 0.00…', size: 8, inputmode: 'decimal', name: 'max_penalty', autocomplete: 'off' });
@@ -1002,11 +1083,53 @@ async function viewBookings() {
     field('Estado', h('select', { onchange: (e) => { st.status = e.target.value; } }, opt('', 'todos'), ['pending', 'confirmed', 'cancelled', 'failed', 'needs_review'].map((s) => opt(s, s, st.status === s)))),
     field('Referência', h('input', { value: st.reference, oninput: (e) => { st.reference = e.target.value; } })),
     h('button', { class: 'primary' }, ic('filter'), 'Filtrar'));
+  // reserva lida direto no parceiro, pelo id do parceiro: a que não passou pelo Connect
+  const ints = (await loadV1Integrations()).filter((i) => i.capabilities && i.capabilities.hotel && i.capabilities.hotel.supplier_bookings);
+  const atPartner = h('select', { name: 'integration' }, ints.length ? ints.map((i) => opt(i.integration, i.integration)) : opt('', 'nenhum parceiro lê pelo id dele'));
+  const by = h('select', { name: 'by' }, opt('locator', 'id no parceiro'), opt('reference', 'referência / localizador da agência'));
+  const handle = h('input', { class: 'mono', size: 40, name: 'handle', spellcheck: 'false', autocomplete: 'off', required: true, placeholder: '7ff42a70-…' });
+  const readAtPartner = (e) => {
+    e.preventDefault();
+    return busy(e.submitter, async () => {
+      const r = await api('GET', '/v1/hotels/supplier-bookings', { query: { integration: atPartner.value, [by.value]: handle.value.trim() }, label: 'reserva no parceiro' });
+      if (ok(r)) supplierBookingModal(r); else openModal(errorBox(r, 'Reserva no parceiro'));
+    });
+  };
+  const partnerCard = h('div', { class: 'card' }, h('div', { class: 'head' },
+    h('div', {}, h('h2', {}, ic('external-link'), ' Reserva no parceiro, pelo id do parceiro'), h('p', { class: 'muted' }, 'GET /v1/hotels/supplier-bookings: lê direto no parceiro uma reserva que não passou pelo Connect (antiga, feita no site dele). Só leitura: nada é guardado.')),
+    h('form', { class: 'row', onsubmit: readAtPartner }, field('Parceiro', atPartner), field('Buscar por', by), field('Valor', handle), h('button', { class: 'primary', disabled: !ints.length }, ic('search'), 'Consultar'))));
+
   if (!st.loaded) load(); else draw();
   return h('div', {},
+    partnerCard,
     h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('calendar', 'Reservas'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/bookings); consultar e cancelar usam a de produto (/v1/hotels/bookings).')),
       h('form', { class: 'row', onsubmit: open }, field('Abrir por id', byId), h('button', {}, 'Abrir'))), filters),
     h('div', { class: 'card' }, tableBox));
+}
+
+function supplierBookingModal(r) {
+  const b = r.body.booking;
+  const p = b.cancellation_policy;
+  openModal(
+    h('h2', {}, b.hotel_name || 'Reserva no parceiro', ' ', badge(b.status)),
+    h('p', { class: 'sub' }, h('span', {}, ic('link'), ' ', r.body.integration + ' · ' + r.body.credential), h('span', {}, ic('calendar'), ' ', b.check_in ? day(b.check_in) + ' → ' + day(b.check_out) : 'sem datas'), callChip(r, 'consulta')),
+    h('div', { class: 'alert blue' }, ic('info-circle'), ' Lida agora no parceiro. Não é uma reserva do Connect: não aparece na lista abaixo e não é cancelada por aqui.'),
+    h('div', { class: 'split' },
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Id no parceiro'), h('dd', { class: 'mono', translate: 'no' }, b.locator),
+        h('dt', {}, 'Número de confirmação'), h('dd', { class: 'mono' }, b.confirmation_number || '—'),
+        h('dt', {}, 'Referência'), h('dd', { class: 'mono' }, b.reference || '—'),
+        h('dt', {}, 'Hotel no parceiro'), h('dd', { class: 'mono small' }, b.supplier_hotel_id || '—'),
+        h('dt', {}, 'hotel_id do Connect'), h('dd', { class: 'mono small' }, b.hotel_id || 'sem vínculo'),
+        h('dt', {}, 'Total'), h('dd', {}, b.net ? money(b.net) : '—', b.pay_local ? ' (hóspede paga no hotel)' : ''),
+        h('dt', {}, 'Cancelamento'), h('dd', { class: 'small' }, p ? policyText(p) : 'o parceiro não informa'),
+        h('dt', {}, 'Criada em'), h('dd', {}, b.created_at ? when(b.created_at) : '—'),
+        b.remarks ? h('dt', {}, 'Observações') : null, b.remarks ? h('dd', { class: 'small' }, b.remarks) : null),
+      h('div', {}, h('h3', {}, 'Quartos e hóspedes'), (b.rooms || []).map((room, i) => h('div', { class: 'room' },
+        h('strong', { class: 'small' }, 'Quarto ' + (i + 1) + ': ' + room.room_name), ' ', badge(BOARDS[room.board] || room.board, 'blue'),
+        h('div', { class: 'small muted' }, room.adults + ' adulto(s)' + (room.children ? ', ' + room.children + ' criança(s)' : '')),
+        h('ul', { class: 'small' }, (room.guests || []).map((g) => h('li', {}, g.first_name + ' ' + g.last_name + (g.age !== undefined ? ' (' + g.age + ' anos)' : '')))))))),
+    jsonBlock(r.body));
 }
 
 // ---------- requisição e resposta ----------

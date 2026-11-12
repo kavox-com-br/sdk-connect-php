@@ -19,10 +19,12 @@ php -S localhost:8300 -t public
 
 Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
 
-- **Hotel**: busca por destino (autocomplete), nome, `hotel_id`, id do GIATA ou código do parceiro; vários
-  quartos e crianças; mais de 90 hotéis viram várias buscas em paralelo. Ficha do hotel (fotos, textos,
+- **Hotel**: busca por destino (autocomplete), nome, `hotel_id`, id do GIATA, código do parceiro ou destino
+  do próprio parceiro (para parceiro fora do GIATA, com a lista de hotéis dele); vários quartos e crianças;
+  sem máximo de hotéis por busca. Ficha do hotel (fotos, textos,
   comodidades), cotação (mudanças, avisos do parceiro, política e taxas) e reserva com `Idempotency-Key`.
-- **Reservas**: lista (API de gestão), consulta no parceiro e cancelamento com multa máxima.
+- **Reservas**: lista (API de gestão), consulta no parceiro e cancelamento com multa máxima; e a leitura de
+  uma reserva direto no parceiro, pelo id dele, para a que não passou pelo Connect.
 - **Credenciais**: parceiros e credenciais da conta; criar pelo formulário que o próprio parceiro descreve
   (`credential_schema`), editar, testar a conexão, pausar e excluir.
 - **Chaves**: chaves de produto com permissões por produto, parceiro, credencial e operação; chave de
@@ -81,9 +83,31 @@ $booking = $api->book(['offer_token' => $quote['offer']['offer_token'], 'rooms' 
 $api->cancel($booking['booking']['id'], Client::uuid());
 ```
 
-O Connect não espalha a busca por parceiros nem junta respostas: cada chamada é uma integração e até 90
-hotéis. `searchMany` faz as chamadas em paralelo (curl multi) e devolve cada uma com `response` ou `error`,
+O Connect não espalha a busca por parceiros nem junta respostas: cada chamada é uma integração e uma lista
+de hotéis, sem máximo. `searchMany` faz as chamadas em paralelo (curl multi) e devolve cada uma com `response` ou `error`,
 sem que uma falha derrube as outras.
+
+## Parceiro fora do GIATA
+
+Parceiro que não está no GIATA (hoje a E-HTL, `ehtl`) não tem hotel no catálogo do Connect. Os destinos e os
+hotéis são os **do próprio parceiro**, lidos pelo Connect na hora, e o id de um destino só vale naquele
+parceiro:
+
+```php
+$dest = $api->supplierDestinations('ehtl', 'acrelandia')['destinations'][0];   // {id, name, region, country}
+$hotels = $api->supplierHotels('ehtl', $dest['id'])['hotels'];                  // supplier_hotel_id, name…
+
+// tarifas de todo o destino do parceiro…
+$api->search('ehtl', ['supplier_destination_id' => $dest['id']], '2027-01-12', '2027-01-14', [['adults' => 2]]);
+// …ou só de alguns hotéis dele
+$api->search('ehtl', ['supplier_hotel_ids' => array_column($hotels, 'supplier_hotel_id')], '2027-01-12', '2027-01-14', [['adults' => 2]]);
+
+// uma reserva antiga, que não passou pelo Connect: lida direto no parceiro, pelo id dele
+$old = $api->supplierBooking('ehtl', locator: '7ff42a70-097c-4cab-9450-5c62cb289158')['booking'];
+```
+
+`GET /v1/integrations` diz o que cada parceiro faz em `capabilities.hotel`: `supplier_catalog`,
+`supplier_destination_search` e `supplier_bookings`.
 
 ## Erros
 
