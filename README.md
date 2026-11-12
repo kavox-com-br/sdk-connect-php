@@ -103,8 +103,12 @@ $api->search('ehtl', ['supplier_destination_id' => $dest['id']], '2027-01-12', '
 $api->search('ehtl', ['supplier_hotel_ids' => array_column($hotels, 'supplier_hotel_id')], '2027-01-12', '2027-01-14', [['adults' => 2]]);
 
 // uma reserva antiga, que não passou pelo Connect: lida direto no parceiro, pelo id dele
+// (na E-HTL o locator é o UUID do Quasar ou o número da reserva, só dígitos)
 $old = $api->supplierBooking('ehtl', locator: '7ff42a70-097c-4cab-9450-5c62cb289158')['booking'];
 ```
+
+`supplierBooking` pede a permissão `supplier_bookings` na chave, separada de `retrieve`: sem ela, a resposta
+é `403 OPERATION_NOT_ALLOWED`.
 
 `GET /v1/integrations` diz o que cada parceiro faz em `capabilities.hotel`: `supplier_catalog`,
 `supplier_destination_search` e `supplier_bookings`.

@@ -133,7 +133,8 @@ final class Client
 
     /**
      * Uma reserva lida direto no parceiro, pelo id dela lá ($locator) ou pela referência com que foi feita:
-     * para a reserva que não passou pelo Connect. Só leitura; nada é guardado no Connect.
+     * para a reserva que não passou pelo Connect. Só leitura; nada é guardado no Connect. A chave precisa
+     * da permissão `supplier_bookings` (a `retrieve` não basta).
      *
      * @return array<string, mixed> {booking: {...}}
      */
