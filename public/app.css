@@ -54,7 +54,7 @@ p { margin: 0; }
 .count { min-width: 18px; padding: 0 5px; border-radius: var(--kc-radius-pill); background: var(--kc-surface-3); font-size: var(--kc-text-2xs); font-weight: 600; color: var(--kc-text-muted); text-align: center; font-variant-numeric: tabular-nums; }
 .count:empty { display: none; }
 .who { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: var(--kc-text-xs); color: var(--kc-text-muted); }
-.view { padding: 24px 20px 48px; max-width: 1280px; margin: 0 auto; outline: none; }
+.view { padding: 24px 24px 48px; width: 100%; outline: none; }
 @media (max-width: 720px) { .top { gap: 8px; padding: 8px 16px; } .view { padding: 16px 16px 40px; } .who { align-items: flex-start; } }
 
 /* ---- blocos ---- */
