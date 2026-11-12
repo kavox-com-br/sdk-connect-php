@@ -91,3 +91,7 @@ Toda falha da API vira `Kavox\Connect\ApiException`: `status`, `errorCode` (ex.:
 `PRICE_CHANGED`, `SUPPLIER_UNAVAILABLE`), `retryable`, `details` (campo a campo), `requestId` (o que o suporte
 pede), `integration`, `supplierCode`/`supplierMessage` (do parceiro, só para log) e `raw` (o objeto `error`
 inteiro, com a `offer` nova num `PRICE_CHANGED`).
+
+## Licença
+
+MIT, veja `LICENSE`. A marca e o logo da Kavox (`public/brand/`) não entram na licença.
