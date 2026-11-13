@@ -852,8 +852,8 @@ function commissionTag(r) {
   const c = r && r.commission;
   if (!c) return null;
   const text = ['comissionada', c.percent ? Number(c.percent).toLocaleString('pt-BR') + '%' : null].filter(Boolean).join(' ') + (c.amount ? ' · ' + money(c.amount) : '');
-  const how = c.settlement === 'deducted' ? 'já descontada: o parceiro cobra o net' : c.settlement === 'paid_later' ? 'paga depois: a conta paga ' + money(c.gross) + ' e a comissão volta' : '';
-  return h('div', { class: 'small', title: 'Preço cheio ' + money(c.gross) + (how ? ' · ' + how : '') }, badge(text, 'blue'));
+  const how = c.settlement === 'deducted' ? 'já descontada: o parceiro cobra o net' : c.settlement === 'paid_later' ? 'paga depois: a conta paga ' + money(c.gross) + ' e a comissão volta' : c.settlement === 'informative' ? 'informativa: o net já é o custo final, o parceiro acerta a comissão fora da reserva' : '';
+  return h('div', { class: 'small', title: (c.settlement === 'informative' ? 'Base ' : 'Preço cheio ') + money(c.gross) + (how ? ' · ' + how : '') }, badge(text, 'blue'));
 }
 
 /** As promoções da tarifa, como etiquetas: só o nome que o parceiro deu. O preço não muda por causa delas. */
@@ -968,7 +968,7 @@ function offerBox(o) {
       r.promotions && r.promotions.length ? [h('dt', {}, 'Promoções'), h('dd', {}, promoTags(r))] : null,
       r.payable ? [h('dt', {}, 'A pagar'), h('dd', {}, money(r.payable))] : null,
       r.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(r), r.payment.prepayment && r.payment.prepayment.description ? h('div', { class: 'muted small' }, r.payment.prepayment.description) : null)] : null,
-      r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount), r.commission.percent ? ' (' + Number(r.commission.percent).toLocaleString('pt-BR') + '%)' : '', ' sobre ' + money(r.commission.gross), ' · ', r.commission.settlement === 'paid_later' ? 'paga depois' : r.commission.settlement === 'deducted' ? 'já descontada' : (r.commission.settlement || ''))] : null,
+      r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount), r.commission.percent ? ' (' + Number(r.commission.percent).toLocaleString('pt-BR') + '%)' : '', ' sobre ' + money(r.commission.gross), ' · ', r.commission.settlement === 'paid_later' ? 'paga depois' : r.commission.settlement === 'deducted' ? 'já descontada' : r.commission.settlement === 'informative' ? 'informativa (não altera o net)' : (r.commission.settlement || ''))] : null,
       r.sale_price ? [h('dt', {}, 'Preço de venda'), h('dd', {}, money(r.sale_price.amount || r.sale_price), r.sale_price.binding ? ' (obrigatório)' : '')] : null,
       o.rate.available !== undefined ? [h('dt', {}, 'Disponíveis'), h('dd', {}, o.rate.available)] : null),
     h('div', {},
