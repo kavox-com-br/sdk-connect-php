@@ -23,7 +23,8 @@ Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
   do próprio parceiro (para parceiro fora do GIATA, com a lista de hotéis dele); vários quartos e crianças;
   sem máximo de hotéis por busca. Ficha do hotel (fotos, textos,
   comodidades), cotação (mudanças, avisos do parceiro, política e taxas) e reserva com `Idempotency-Key`.
-- **Reservas**: lista (API de gestão), consulta no parceiro e cancelamento com multa máxima; e a leitura de
+- **Reservas**: lista (API de gestão), consulta no parceiro, **alteração** (cotar a alteração e alterar: datas,
+  ocupação e nomes dos hóspedes, onde o parceiro altera) e cancelamento com multa máxima; e a leitura de
   uma reserva direto no parceiro, pelo id dele, para a que não passou pelo Connect.
 - **Credenciais**: parceiros e credenciais da conta; criar pelo formulário que o próprio parceiro descreve
   (`credential_schema`), editar, testar a conexão, pausar e excluir.
@@ -79,8 +80,16 @@ $booking = $api->book(['offer_token' => $quote['offer']['offer_token'], 'rooms' 
     ['first_name' => 'Ana', 'last_name' => 'Souza'], ['first_name' => 'Rui', 'last_name' => 'Souza'],
 ]]]], $key);
 
+// alterar: cota a alteração (não muda nada) e depois altera, com Idempotency-Key. Precisa da permissão
+// `modify` na chave e de um parceiro que altere (capabilities.hotel.modify); nos demais, 422 UNSUPPORTED_OPERATION
+$id = $booking['booking']['id'];
+$change = $api->modifyQuote($id, '2027-01-10', '2027-01-13', [['adults' => 2]]);
+$api->modify($id, $change['modification']['modify_token'], [['guests' => [
+    ['first_name' => 'Ana', 'last_name' => 'Souza'], ['first_name' => 'Rui', 'last_name' => 'Souza'],
+]]], Client::uuid());
+
 // cancelar também leva Idempotency-Key
-$api->cancel($booking['booking']['id'], Client::uuid());
+$api->cancel($id, Client::uuid());
 ```
 
 O Connect não espalha a busca por parceiros nem junta respostas: cada chamada é uma integração e uma lista

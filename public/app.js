@@ -10,6 +10,14 @@ const SCENARIOS = {
   book: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'pending_fail', 'pending_stuck', 'notice_added', 'credential', 'unavailable', 'timeout', 'slow'],
   retrieve: ['ok', 'credential', 'unavailable', 'timeout', 'slow'],
   cancel: ['ok', 'validation', 'cancel_penalty', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
+  modifyQuote: ['ok', 'no_availability', 'price_changed', 'credential', 'unavailable', 'timeout', 'slow'],
+  modify: ['ok', 'no_availability', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+};
+const PAYMENT_METHODS = { invoice: 'faturado', voucher: 'voucher', prepay: 'pré-pagamento', deposit: 'depósito', credit_card: 'cartão de crédito' };
+const BOOKING_WARNINGS = {
+  price_changed_after_booking: 'O parceiro informou outro preço depois de reservar ou alterar.',
+  penalty_above_max: 'O parceiro cobrou multa acima do máximo aceito.',
+  modification_unconfirmed: 'Uma alteração foi enviada e o parceiro não respondeu com clareza: a reserva pode já estar alterada lá. Repita a alteração com a mesma Idempotency-Key.',
 };
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
 const STATUS_TONE = { active: 'green', confirmed: 'green', ok: 'green', paused: 'amber', pending: 'amber', needs_review: 'amber', invalid: 'red', failed: 'red', revoked: 'red', cancelled: '', expired: 'red' };
@@ -827,7 +835,7 @@ function hotelCard(x, integration) {
     h('div', { class: 'tablewrap' }, h('table', { class: 'rates' },
       h('thead', {}, h('tr', {}, ['Quarto', 'Regime', 'Total net', 'Cancelamento', 'Taxas', ''].map((t) => h('th', {}, t)))),
       h('tbody', {}, x.rates.map((r) => h('tr', {},
-        h('td', {}, r.room_name, r.bed_description ? h('div', { class: 'muted small' }, r.bed_description) : null, promoTags(r)),
+        h('td', {}, r.room_name, r.rate_name ? h('div', { class: 'small' }, r.rate_name) : null, r.bed_description ? h('div', { class: 'muted small' }, r.bed_description) : null, promoTags(r), paymentLine(r)),
         h('td', {}, BOARDS[r.board] || r.board, r.board_name ? h('div', { class: 'muted small' }, r.board_name) : null),
         h('td', { class: 'net nowrap' }, money(r.net), r.payable ? h('div', { class: 'muted small' }, 'a pagar ' + money(r.payable)) : null, r.commission ? h('div', { class: 'small' }, badge('comissionada', 'blue')) : null),
         h('td', { class: 'small' }, policyText(r.cancellation_policy)),
@@ -844,6 +852,21 @@ function promoTags(r) {
   const list = (r && r.promotions) || [];
   if (!list.length) return null;
   return h('div', { class: 'promos' }, list.map((x) => h('span', { class: 'badge amber', title: x.description || 'Promoção informada pelo parceiro' }, ic('tag'), x.name)));
+}
+
+/** O que o parceiro diz sobre pagar a tarifa a ele: meios aceitos e pré-pagamento exigido. Só informa. */
+function paymentText(r) {
+  const p = r && r.payment;
+  if (!p) return null;
+  const methods = (p.methods || []).map((m) => PAYMENT_METHODS[m] || m).join(', ');
+  const pre = p.prepayment ? 'pré-pagamento de ' + money(p.prepayment.amount) + (p.prepayment.due_at ? ' até ' + when(p.prepayment.due_at) : ' no ato da reserva') : '';
+  return [methods, pre].filter(Boolean).join(' · ');
+}
+function paymentLine(r) {
+  const text = paymentText(r);
+  if (!text) return null;
+  const onlyCard = r.payment.methods && r.payment.methods.length === 1 && r.payment.methods[0] === 'credit_card';
+  return h('div', { class: 'muted small', title: (r.payment.prepayment && r.payment.prepayment.description) || 'Pagamento ao parceiro, como ele informa' }, ic('credit-card'), ' ', text, onlyCard ? h('span', {}, ' ', badge('só cartão: ainda não reservável', 'amber')) : null);
 }
 
 function policyText(p) {
@@ -904,9 +927,10 @@ async function quote(rateToken, hotelResult) {
     jsonBlock(q));
 }
 
-function changesBox(changes) {
-  if (!changes || !changes.length) return h('div', { class: 'alert green' }, 'Sem mudança desde a busca.');
-  return h('div', { class: 'alert amber' }, h('strong', {}, 'Mudou desde a busca:'), h('ul', {}, changes.map((c) => h('li', {},
+function changesBox(changes, since) {
+  since = since || 'desde a busca';
+  if (!changes || !changes.length) return h('div', { class: 'alert green' }, 'Sem mudança ' + since + '.');
+  return h('div', { class: 'alert amber' }, h('strong', {}, 'Mudou ' + since + ':'), h('ul', {}, changes.map((c) => h('li', {},
     h('strong', {}, c.type), ' ', describe(c.previous), ' → ', describe(c.current),
     c.difference ? ' (' + money(c.difference) + (c.difference_percent ? ', ' + c.difference_percent + '%' : '') + ')' : '', ' ', badge(c.direction, c.direction === 'worse' ? 'red' : c.direction === 'better' ? 'green' : '')))));
 }
@@ -929,10 +953,12 @@ function offerBox(o) {
       h('dt', {}, 'Estadia'), h('dd', {}, day(o.check_in) + ' → ' + day(o.check_out)),
       h('dt', {}, 'Quartos'), h('dd', {}, o.rooms.map((x, i) => 'Q' + (i + 1) + ': ' + x.adults + ' adulto(s)' + (x.children_ages && x.children_ages.length ? ', crianças ' + x.children_ages.join(', ') : '')).join(' · ')),
       h('dt', {}, 'Quarto'), h('dd', {}, r.room_name, r.bed_description ? ' · ' + r.bed_description : ''),
+      r.rate_name ? [h('dt', {}, 'Tarifa'), h('dd', {}, r.rate_name)] : null,
       h('dt', {}, 'Regime'), h('dd', {}, BOARDS[r.board] || r.board, r.board_name ? ' · ' + r.board_name : ''),
       h('dt', {}, 'Total net'), h('dd', {}, h('strong', {}, money(r.net))),
       r.promotions && r.promotions.length ? [h('dt', {}, 'Promoções'), h('dd', {}, promoTags(r))] : null,
       r.payable ? [h('dt', {}, 'A pagar'), h('dd', {}, money(r.payable))] : null,
+      r.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(r), r.payment.prepayment && r.payment.prepayment.description ? h('div', { class: 'muted small' }, r.payment.prepayment.description) : null)] : null,
       r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount || r.commission.gross), ' ', r.commission.settlement || '')] : null,
       r.sale_price ? [h('dt', {}, 'Preço de venda'), h('dd', {}, money(r.sale_price.amount || r.sale_price), r.sale_price.binding ? ' (obrigatório)' : '')] : null,
       o.rate.available !== undefined ? [h('dt', {}, 'Disponíveis'), h('dd', {}, o.rate.available)] : null),
@@ -1017,6 +1043,7 @@ function drawBooking(body, b, raw, note) {
     });
   };
   const warnings = (raw && raw.warnings) || [];
+  if (b.status === 'confirmed') actions.append(modifySection(body, b));
   if (b.status !== 'cancelled' && b.status !== 'failed') {
     actions.append(h('div', { class: 'row' },
       b.integration === 'mock' ? field('Cenário da consulta', scenarioSelect('retrieve', 'ok', (v) => { retrieveScenario = v; })) : null,
@@ -1033,6 +1060,8 @@ function drawBooking(body, b, raw, note) {
     h('div', { class: 'sub' }, h('span', {}, ic('building'), ' ', ht ? ht.name : (b.supplier_hotel_id || '')), h('span', {}, ic('calendar'), ' ', day(b.check_in) + ' → ' + day(b.check_out)), h('span', {}, ic('link'), ' ', b.integration)),
     note ? h('div', { class: 'alert blue' }, note) : '',
     warnings.map((w) => h('div', { class: 'alert amber' }, h('strong', {}, w.code), w.offer ? ' — preço agora ' + money(w.offer.rate && w.offer.rate.net) : '')),
+    (b.warnings || []).map((w) => h('div', { class: 'alert amber' }, h('strong', {}, w), BOOKING_WARNINGS[w] ? ' — ' + BOOKING_WARNINGS[w] : '')),
+    b.changes && b.changes.length ? changesBox(b.changes, 'em relação ao que foi cotado') : null,
     h('div', { class: 'split' },
       h('dl', { class: 'kv' },
         h('dt', {}, 'id'), h('dd', { class: 'mono' }, b.id),
@@ -1043,8 +1072,10 @@ function drawBooking(body, b, raw, note) {
         h('dt', {}, 'Confirmação'), h('dd', { class: 'mono' }, b.confirmation_number || '—'),
         h('dt', {}, 'Estadia'), h('dd', {}, day(b.check_in) + ' → ' + day(b.check_out)),
         h('dt', {}, 'Quartos'), h('dd', {}, (b.rooms || []).map((x) => x.adults + ' ad.' + (x.children_ages && x.children_ages.length ? ' + ' + x.children_ages.length + ' cr.' : '')).join(' · ')),
-        b.rate ? [h('dt', {}, 'Tarifa'), h('dd', {}, b.rate.room_name, ' · ', BOARDS[b.rate.board] || b.rate.board, ' · ', h('strong', {}, money(b.rate.net)))] : null,
-        h('dt', {}, 'Criada'), h('dd', {}, when(b.created_at))),
+        b.rate ? [h('dt', {}, 'Tarifa'), h('dd', {}, b.rate.room_name, b.rate.rate_name ? ' · ' + b.rate.rate_name : '', ' · ', BOARDS[b.rate.board] || b.rate.board, ' · ', h('strong', {}, money(b.rate.net)))] : null,
+        b.rate && b.rate.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(b.rate))] : null,
+        h('dt', {}, 'Criada'), h('dd', {}, when(b.created_at)),
+        b.modified_at ? [h('dt', {}, 'Alterada'), h('dd', {}, when(b.modified_at))] : null),
       h('div', {},
         h('h3', {}, 'Cancelamento'),
         c.cancelled_at ? h('dl', { class: 'kv' },
@@ -1059,6 +1090,105 @@ function drawBooking(body, b, raw, note) {
     h('h2', { class: 'stitle' }, ic('bolt'), 'Ações'), actions, out,
     jsonBlock(raw || b));
   titleModal(body);
+}
+
+/**
+ * A alteração de uma reserva confirmada, nos dois passos da API: cotar a alteração (não muda nada, devolve o
+ * modify_token) e alterar. A estadia enviada é a inteira desejada; o número de quartos não muda.
+ */
+function modifySection(body, b) {
+  const box = h('div', { class: 'stack' });
+  const out = h('div', { class: 'stack' });
+  const checkIn = h('input', { type: 'date', value: b.check_in, name: 'check_in' });
+  const checkOut = h('input', { type: 'date', value: b.check_out, name: 'check_out' });
+  const rooms = (b.rooms || []).map((room) => ({
+    adults: h('input', { type: 'number', min: 1, max: 9, value: room.adults, style: 'width:70px' }),
+    ages: h('input', { value: (room.children_ages || []).join(', '), placeholder: 'ex.: 5, 9…', size: 10, autocomplete: 'off' }),
+  }));
+  let quoteScenario = 'ok';
+  const stay = () => ({
+    check_in: checkIn.value, check_out: checkOut.value,
+    rooms: rooms.map((x) => {
+      const ages = x.ages.value.split(/[,; ]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n >= 0);
+      return ages.length ? { adults: Number(x.adults.value), children_ages: ages } : { adults: Number(x.adults.value) };
+    }),
+  });
+  const quoteChange = async (e) => busy(e.target, async () => {
+    const r = await api('POST', '/v1/hotels/bookings/' + b.id + '/modify/quote', { body: stay(), headers: b.integration === 'mock' ? mockHeader(quoteScenario) : {}, label: 'cotar alteração' });
+    if (!ok(r)) { put(out, errorBox(r, 'Cotação da alteração'), unsupported(r) ? h('p', { class: 'small' }, 'Este parceiro não altera reserva: a operação não está disponível para esta integração.') : null); return; }
+    put(out, modificationBox(body, b, r));
+  });
+  const section = h('div', { class: 'stack' },
+    h('div', { class: 'row' },
+      field('Check-in novo', checkIn), field('Check-out novo', checkOut),
+      rooms.map((x, i) => [field('Q' + (i + 1) + ' adultos', x.adults), field('Q' + (i + 1) + ' idades das crianças', x.ages)]),
+      b.integration === 'mock' ? field('Cenário da cotação', scenarioSelect('modifyQuote', 'ok', (v) => { quoteScenario = v; })) : null,
+      h('button', { onclick: quoteChange }, ic('pencil'), 'Cotar alteração')),
+    h('p', { class: 'muted small' }, 'POST /v1/hotels/bookings/{id}/modify/quote: a estadia inteira desejada (para trocar só os nomes, cote a mesma estadia). Não muda nada; devolve o modify_token.'),
+    out);
+  put(box, section);
+  // só onde o parceiro altera: nos demais a API responde 422 UNSUPPORTED_OPERATION
+  loadV1Integrations().then((list) => {
+    const it = (list || []).find((i) => i.integration === b.integration);
+    const can = it && it.capabilities && it.capabilities.hotel && it.capabilities.hotel.modify;
+    if (it && !can) put(box, h('div', { class: 'muted small' }, ic('ban'), ' Alteração não está disponível para a integração ' + b.integration + ' (capabilities.hotel.modify = false).'));
+  }).catch(() => {});
+  return box;
+}
+
+const unsupported = (r) => r.body && r.body.error && r.body.error.code === 'UNSUPPORTED_OPERATION';
+
+/** A alteração cotada: o que muda, a tarifa nova e o formulário dos hóspedes que faz a alteração. */
+function modificationBox(body, b, quoted) {
+  const m = quoted.body.modification;
+  const guestsInputs = m.rooms.map((room, ri) => {
+    const guests = [];
+    for (let i = 0; i < room.adults; i++) guests.push({ age: null, label: i === 0 ? 'Titular (adulto)' : 'Adulto ' + (i + 1) });
+    for (const age of room.children_ages || []) guests.push({ age, label: 'Criança, ' + age + ' anos' });
+    return guests.map((g, gi) => {
+      const [fn, ln] = SAMPLE[(ri * 2 + gi) % SAMPLE.length];
+      return { ...g, first: h('input', { value: fn, required: true, size: 12 }), last: h('input', { value: ln, required: true, size: 12 }) };
+    });
+  });
+  const maxIncrease = h('input', { placeholder: '2.00…', size: 6, inputmode: 'decimal', name: 'max_increase', autocomplete: 'off' });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  let scenario = 'ok';
+  let token = m.modify_token;
+  const out = h('div');
+  const submit = async (e) => {
+    e.preventDefault();
+    if (b.integration !== 'mock' && !confirm('Alterar a reserva ' + (b.confirmation_number || b.locator || b.id) + ' no parceiro para ' + day(m.check_in) + ' → ' + day(m.check_out) + ', por ' + money(m.rate.net) + '?')) return;
+    const req = {
+      modify_token: token,
+      rooms: guestsInputs.map((gs) => ({ guests: gs.map((g) => (g.age === null ? { first_name: g.first.value, last_name: g.last.value } : { first_name: g.first.value, last_name: g.last.value, age: g.age })) })),
+    };
+    if (maxIncrease.value) req.accept_changes = { max_price_increase_percent: maxIncrease.value };
+    await busy(e.submitter, async () => {
+      const r = await api('POST', '/v1/hotels/bookings/' + b.id + '/modify', { body: req, headers: { 'Idempotency-Key': key.value, ...(b.integration === 'mock' ? mockHeader(scenario) : {}) }, label: 'alterar reserva' });
+      if (ok(r)) { drawBooking(body, r.body.booking || r.body, r.body, 'Reserva alterada no parceiro: a estadia e a tarifa abaixo já são as novas.'); return; }
+      const err = (r.body && r.body.error) || {};
+      if (err.modification) {
+        // a alteração mudou desde a cotação: o erro traz o token da que vale agora
+        token = err.modification.modify_token;
+        put(out, errorBox(r, 'Alteração'), changesBox(err.modification.changes, 'desde a cotação da alteração'), h('p', { class: 'small' }, 'Nada foi alterado. O botão agora envia o modify_token novo: confirme e altere de novo.'));
+        return;
+      }
+      put(out, errorBox(r, 'Alteração'), h('p', { class: 'small' }, r.status === 0 || err.retryable ? 'Sem resposta clara do parceiro: a reserva fica como estava, com o aviso modification_unconfirmed. Repita com a mesma Idempotency-Key.' : 'Recusada: a reserva fica como estava.'));
+    });
+  };
+  return h('div', { class: 'stack' },
+    h('div', { class: 'sub' }, h('span', {}, ic('clock'), ' modify_token vale até ' + when(m.expires_at)), callChip(quoted, 'cotação da alteração')),
+    changesBox(quoted.body.changes, 'em relação à reserva de hoje'),
+    noticesBox(m.notices),
+    offerBox(m),
+    h('form', { class: 'stack', onsubmit: submit },
+      guestsInputs.map((gs, ri) => h('div', { class: 'room', style: 'flex-direction:column;align-items:stretch' }, h('strong', { class: 'small' }, 'Quarto ' + (ri + 1)),
+        gs.map((g) => h('div', { class: 'row' }, h('span', { class: 'small muted', style: 'width:120px' }, g.label), field('Nome', g.first), field('Sobrenome', g.last))))),
+      h('div', { class: 'row' }, field('Aceita aumento até (%)', maxIncrease), field('Idempotency-Key', key),
+        h('button', { type: 'button', class: 'sm', onclick: () => { key.value = uuid(); } }, 'Nova chave'),
+        b.integration === 'mock' ? field('Cenário da alteração', scenarioSelect('modify', scenario, (v) => { scenario = v; })) : null),
+      b.integration !== 'mock' ? h('div', { class: 'alert red' }, 'Integração real (' + b.integration + '): esta alteração vai de verdade ao parceiro.') : null,
+      out, h('div', { class: 'row' }, h('button', { class: 'primary' }, ic('check'), 'Alterar reserva'))));
 }
 
 async function viewBookings() {

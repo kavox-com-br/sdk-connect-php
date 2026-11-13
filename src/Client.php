@@ -238,6 +238,34 @@ final class Client
         return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/cancel', $body, $idempotencyKey);
     }
 
+    /**
+     * Cota a alteração de uma reserva confirmada: como ela ficaria com outra estadia. Não muda nada. $rooms é a
+     * ocupação inteira desejada, no mesmo número e ordem dos quartos reservados; para trocar só os nomes dos
+     * hóspedes, cote a mesma estadia. A resposta traz `modification.modify_token` e `changes`. Parceiro que não
+     * altera reserva (`capabilities.hotel.modify = false`) responde 422 UNSUPPORTED_OPERATION.
+     *
+     * @param list<array{adults: int, children_ages?: list<int>}> $rooms
+     * @return array<string, mixed>
+     */
+    public function modifyQuote(string $bookingId, string $checkIn, string $checkOut, array $rooms): array
+    {
+        return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/modify/quote', ['check_in' => $checkIn, 'check_out' => $checkOut, 'rooms' => $rooms]);
+    }
+
+    /**
+     * Altera a reserva no parceiro para a estadia de uma alteração cotada. $rooms traz todos os hóspedes da
+     * estadia nova, como na reserva. Guarde a $idempotencyKey: se a resposta não vier (a reserva ganha o aviso
+     * `modification_unconfirmed`), repita com a mesma chave e o mesmo corpo.
+     *
+     * @param list<array{guests: list<array{first_name: string, last_name: string, age?: int}>}> $rooms
+     * @param array<string, mixed> $options ex.: ['accept_changes' => ['max_price_increase_percent' => '2.00']]
+     * @return array<string, mixed>
+     */
+    public function modify(string $bookingId, string $modifyToken, array $rooms, string $idempotencyKey, array $options = []): array
+    {
+        return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/modify', ['modify_token' => $modifyToken, 'rooms' => $rooms] + $options, $idempotencyKey);
+    }
+
     public static function uuid(): string
     {
         $b = random_bytes(16);
