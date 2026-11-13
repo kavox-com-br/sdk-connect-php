@@ -29,6 +29,11 @@ Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
   cartão, o formulário de reserva tem os campos do cartão (`payment.card`); a reserva mostra como foi paga
   (cartão do pedido, cartão fixo ou VCN, com a credencial do emissor usada) e a lista tem coluna e filtro
   de pagamento.
+- **Seguro viagem**: buscar planos numa integração (países, datas, idades), ver coberturas completas e
+  opcionais, cotar para as pessoas reais e emitir; a lista das reservas de seguro (API de gestão) e, em cada
+  uma, consultar no parceiro, cancelar a reserva ou um voucher, mudar o início da vigência e pedir reenvio do
+  voucher. O Connect não filtra plano nem escolhe valor: mostra o que o parceiro respondeu; a única
+  conferência é se o preço mudou antes de emitir.
 - **Cartões virtuais**: lista dos cartões da conta (API de gestão), com os que sobraram de reserva que não
   existe mais; emitir um cartão avulso (o número aparece uma única vez), consultar no emissor, atualizar
   limite e validade, cancelar pela chave de produto ou pela API de gestão.

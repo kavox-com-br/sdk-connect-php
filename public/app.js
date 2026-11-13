@@ -13,6 +13,9 @@ const SCENARIOS = {
   modifyQuote: ['ok', 'no_availability', 'price_changed', 'credential', 'unavailable', 'timeout', 'slow'],
   modify: ['ok', 'no_availability', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
   vcnIssue: ['ok', 'validation', 'credential', 'unavailable', 'timeout', 'slow'],
+  insuranceSearch: ['ok', 'credential', 'unavailable', 'timeout', 'slow'],
+  insuranceQuote: ['ok', 'price_changed', 'credential', 'unavailable', 'timeout', 'slow'],
+  insuranceBook: ['ok', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
 };
 const PAYMENT_METHODS = { invoice: 'faturado', voucher: 'voucher', prepay: 'pré-pagamento', deposit: 'depósito', credit_card: 'cartão de crédito' };
 const BOOKING_WARNINGS = {
@@ -237,7 +240,7 @@ const stars = (n) => (n ? h('span', { class: 'stars', title: n + ' estrelas' }, 
 
 // ---------- rotas ----------
 
-const VIEWS = { hotel: viewHotel, reservas: viewBookings, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
+const VIEWS = { hotel: viewHotel, reservas: viewBookings, seguro: viewInsurance, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
 function tab() { return (location.hash.replace(/^#\//, '') || 'hotel').split('/')[0]; }
 async function render() {
   const name = VIEWS[tab()] ? tab() : 'hotel';
@@ -1345,6 +1348,261 @@ async function viewBookings() {
  * usam a de produto (/v1/vcns), que pede permissão no produto vcn. O número do cartão só existe na resposta
  * da emissão: o Connect não o guarda.
  */
+// ---------- seguro viagem (/v1/insurances) ----------
+
+const scenarioHeader = (s) => (s && s !== 'ok' ? { 'X-Mock-Scenario': s } : {});
+const insuranceParts = (b) => (b ? [['original', 'antes de desconto'], ['without_taxes', 'sem impostos'], ['assistance', 'assistência'], ['insurance', 'seguro']].filter(([k]) => b[k]).map(([k, label]) => label + ' ' + money(b[k])).join(' · ') : '');
+
+/** Seguro: buscar planos, cotar para as pessoas reais, emitir, e a lista do que foi emitido. */
+async function viewInsurance() {
+  const st = (S.insurance ||= { environment: (S.me && S.me.environment) || 'sandbox', items: [], cursor: null, loaded: false, plans: null });
+  const sellers = (await loadV1Integrations()).filter((i) => (i.credentials || []).some((c) => (c.allowed || []).some((a) => a.product === 'insurance' && a.operations.includes('search'))));
+  const today = new Date();
+  const plus = (days) => { const d = new Date(today); d.setDate(d.getDate() + days); return iso(d); };
+  const integration = h('select', { name: 'integration', required: true }, sellers.length ? sellers.map((i) => opt(i.integration, i.integration)) : opt('', 'a chave não busca seguro em nenhum parceiro'));
+  const countries = h('input', { value: 'PT,ES', required: true, name: 'destination_countries', size: 12, autocomplete: 'off', spellcheck: 'false', title: 'Códigos ISO de país, separados por vírgula. BR = plano nacional' });
+  const start = h('input', { type: 'date', value: plus(30), required: true, name: 'start_date' });
+  const end = h('input', { type: 'date', value: plus(40), required: true, name: 'end_date' });
+  const ages = h('input', { value: '40,38', required: true, name: 'ages', size: 10, inputmode: 'numeric', autocomplete: 'off', title: 'Uma idade por pessoa, no primeiro dia de cobertura' });
+  let scenario = 'ok';
+  const plansBox = h('div');
+  const listBox = h('div');
+
+  const drawPlans = () => {
+    const r = st.plans;
+    if (!r) { put(plansBox); return; }
+    put(plansBox, r.results.length ? h('div', { class: 'stack' }, r.results.map((p) => h('div', { class: 'card' },
+      h('div', { class: 'head' },
+        h('div', {}, h('strong', {}, p.plan_name), ' ', badge(p.plan_kind, p.plan_kind === 'annual' ? 'amber' : ''), (p.passengers || []).some((x) => x.not_covered) ? [' ', badge('idade recusada pelo parceiro', 'red')] : null,
+          h('div', { class: 'small muted' }, [p.plan_code, p.rate_code].filter(Boolean).join(' · '), p.region ? ' · ' + p.region : '', ' · ', p.days, ' dia(s)'),
+          p.caption ? h('div', { class: 'small' }, p.caption) : null),
+        h('div', { class: 'right' }, h('strong', {}, money(p.price)),
+          p.price_in_plan_currency ? h('div', { class: 'small muted' }, money(p.price_in_plan_currency), p.exchange_rate ? ' · câmbio ' + p.exchange_rate : '') : null,
+          insuranceParts(p.price_breakdown) ? h('div', { class: 'small muted' }, insuranceParts(p.price_breakdown)) : null)),
+      (p.passengers || []).length ? h('div', { class: 'small muted' }, p.passengers.map((x) => x.age + ' anos: ' + money(x.price) + (x.not_covered ? ' (recusada)' : '')).join(' · ')) : null,
+      (p.coverages || []).length ? h('div', { class: 'small' }, p.coverages.slice(0, 4).map((c) => c.name + ' ' + (c.limit ? money(c.limit) : c.text || '')).join(' · ')) : null,
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: () => insuranceQuoteForm(p, r.ages, reloadList) }, ic('calculator'), 'Cotar e emitir'),
+        h('button', { onclick: (e) => busy(e.target, () => insuranceExtras('coverages', p)) }, 'Coberturas'),
+        h('button', { onclick: (e) => busy(e.target, () => insuranceExtras('addons', p)) }, 'Opcionais'),
+        p.terms_url && p.terms_url.startsWith('http') ? h('a', { href: p.terms_url, target: '_blank', rel: 'noopener noreferrer' }, 'Condições gerais') : null),
+      jsonBlock(p)))) : h('div', { class: 'card empty' }, emptyMark(), 'O parceiro não tem plano para essas pessoas e esse destino.'));
+  };
+  const search = async (e) => {
+    e.preventDefault();
+    const list = ages.value.split(',').map((x) => parseInt(x.trim(), 10)).filter((x) => !Number.isNaN(x));
+    const r = await api('POST', '/v1/insurances/search', {
+      body: { integration: integration.value, destination_countries: countries.value.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean), start_date: start.value, end_date: end.value, ages: list },
+      headers: scenarioHeader(scenario), label: 'buscar seguro',
+    });
+    if (!ok(r)) { st.plans = null; put(plansBox, errorBox(r, 'Busca')); return; }
+    st.plans = { results: r.body.results, ages: list };
+    drawPlans();
+  };
+
+  const load = async (more) => {
+    const r = await api('GET', '/v1/management/insurance-bookings', { query: { environment: st.environment, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas de seguro' });
+    if (!ok(r)) { put(listBox, errorBox(r)); return; }
+    st.items = more ? st.items.concat(r.body.data) : r.body.data;
+    st.cursor = r.body.next_cursor || null;
+    st.loaded = true;
+    drawList();
+  };
+  const reloadList = () => load();
+  const openOne = (b) => insuranceModal(b, reloadList);
+  const drawList = () => put(listBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Vigência', 'Plano', 'Parceiro', 'Localizador', 'Vouchers', 'Preço'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, st.items.map((b) => h('tr', { class: 'click', tabindex: 0, onclick: () => openOne(b), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openOne(b); } } },
+      h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status)),
+      h('td', { class: 'nowrap' }, day(b.start_date) + ' → ' + day(b.end_date)),
+      h('td', {}, b.plan.plan_name, h('div', { class: 'small muted' }, (b.destination_countries || []).join(', '))),
+      h('td', {}, b.integration), h('td', {}, h('span', { class: 'mono' }, b.locator || '—'), h('div', { class: 'small muted' }, b.reference || '')),
+      h('td', { class: 'nowrap' }, (b.vouchers || []).filter((v) => v.status !== 'cancelled').length + ' de ' + (b.vouchers || []).length + ' em vigor'),
+      h('td', { class: 'nowrap' }, money(b.plan.price)))))),
+  st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhuma reserva de seguro neste ambiente.'));
+
+  const byId = h('input', { placeholder: '01a1cd35-…', class: 'mono', size: 38, name: 'booking_id', spellcheck: 'false', autocomplete: 'off', required: true });
+  const openById = async (e) => {
+    e.preventDefault();
+    const r = await api('GET', '/v1/insurances/bookings/' + byId.value.trim(), { label: 'consultar seguro' });
+    if (ok(r)) openOne(r.body.booking); else openModal(errorBox(r, 'Reserva de seguro'));
+  };
+
+  if (!st.loaded) load(); else drawList();
+  drawPlans();
+  return h('div', {},
+    h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('shield', 'Seguro viagem'),
+      h('p', { class: 'muted' }, 'Busca numa integração os planos para a viagem. O Connect não filtra nem escolhe: todo plano que o parceiro responde aparece, marcado com o que ele disse (anual, idade recusada, os dois valores, o câmbio). A única conferência é se o preço mudou antes de emitir.'))),
+    h('form', { class: 'row', onsubmit: (e) => busy(e.submitter, () => search(e)) },
+      field('Integração', integration), field('Destino (países)', countries), field('Início', start), field('Fim', end), field('Idades', ages),
+      field('Cenário', scenarioSelect('insuranceSearch', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary' }, ic('search'), 'Buscar planos'))),
+    plansBox,
+    h('div', { class: 'card' }, h('div', { class: 'head' },
+      h('div', {}, title('list', 'Reservas de seguro'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/insurance-bookings). Uma reserva não leva nome, documento, contato nem endereço de ninguém: o Connect não guarda.')),
+      h('div', { class: 'row' },
+        field('Ambiente', h('select', { onchange: (e) => { st.environment = e.target.value; load(); } }, opt('sandbox', 'sandbox', st.environment === 'sandbox'), opt('production', 'production', st.environment === 'production'))),
+        h('form', { class: 'row', onsubmit: openById }, field('Abrir por id (/v1/insurances/bookings)', byId), h('button', {}, 'Abrir')))),
+    listBox));
+}
+
+/** Coberturas completas ou opcionais de um plano, pelo token dele. */
+async function insuranceExtras(kind, plan) {
+  const r = await api('POST', '/v1/insurances/' + kind, { body: { token: plan.rate_token || plan.offer_token }, label: kind === 'coverages' ? 'coberturas' : 'opcionais' });
+  if (!ok(r)) { openModal(errorBox(r, kind === 'coverages' ? 'Coberturas' : 'Opcionais')); return; }
+  const rows = kind === 'coverages'
+    ? r.body.coverages.map((c) => h('tr', {}, h('td', {}, c.name, h('div', { class: 'mono small muted' }, c.code)), h('td', { class: 'nowrap' }, c.limit ? money(c.limit) : c.text || '—'), h('td', { class: 'nowrap' }, c.deductible ? money(c.deductible) : '—')))
+    : r.body.addons.map((a) => h('tr', {}, h('td', {}, a.name, h('div', { class: 'mono small muted' }, [a.code, a.rate_code, a.category].filter(Boolean).join(' · '))), h('td', { class: 'nowrap' }, money(a.price)), h('td', {}, 'por pessoa')));
+  const body = openModal();
+  frame(body, title('shield', (kind === 'coverages' ? 'Coberturas de ' : 'Opcionais de ') + plan.plan_name),
+    rows.length ? h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {}, (kind === 'coverages' ? ['Cobertura', 'Limite', 'Franquia'] : ['Opcional', 'Preço', '']).map((t) => h('th', {}, t)))), h('tbody', {}, rows))) : h('div', { class: 'empty' }, 'O parceiro não devolveu nada.'),
+    jsonBlock(r.body));
+  titleModal(body);
+}
+
+/** Cota um plano para as pessoas reais e, com a oferta, emite. */
+function insuranceQuoteForm(plan, ages, reload) {
+  const body = openModal();
+  const out = h('div');
+  const year = new Date().getFullYear();
+  const births = ages.map((age) => h('input', { type: 'date', value: (year - age - 1) + '-06-15', required: true, name: 'birth_date' }));
+  let scenario = 'ok';
+  const quote = (e) => busy(e.target, async () => {
+    const r = await api('POST', '/v1/insurances/quote', { body: { rate_token: plan.rate_token, birth_dates: births.map((b) => b.value) }, headers: scenarioHeader(scenario), label: 'cotar seguro' });
+    if (!ok(r)) { put(out, errorBox(r, 'Cotação')); return; }
+    put(out, insuranceIssueForm(r.body.offer, r.body.changed, births.map((b) => b.value), reload));
+  });
+  frame(body, title('calculator', 'Cotar ', plan.plan_name),
+    h('p', { class: 'muted' }, 'Uma data de nascimento por pessoa, na ordem das idades buscadas. O parceiro recebe a idade que cada data dá no primeiro dia de cobertura.'),
+    h('div', { class: 'row' }, births.map((b, i) => field('Pessoa ' + (i + 1) + ' (' + ages[i] + ' anos na busca)', b)), field('Cenário', scenarioSelect('insuranceQuote', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary', onclick: quote }, ic('calculator'), 'Cotar')),
+    out);
+  titleModal(body);
+}
+
+/** A emissão: os dados de cada pessoa vão ao parceiro e não ficam no Connect. */
+function insuranceIssueForm(offer, changed, births, reload) {
+  const out = h('div');
+  const names = ['Marina', 'Paulo', 'Ana', 'Pedro', 'Clara', 'Rui', 'Lia', 'Davi'];
+  const people = births.map((b, i) => ({
+    first: h('input', { value: names[i % names.length], required: true, maxlength: 60, name: 'first_name', autocomplete: 'off', size: 12 }),
+    last: h('input', { value: 'Souza Lima', required: true, maxlength: 60, name: 'last_name', autocomplete: 'off', size: 14 }),
+    doc: h('input', { value: '52998224725', required: true, name: 'document', autocomplete: 'off', size: 13, inputmode: 'numeric', title: 'CPF de exemplo, válido só no formato' }),
+    email: h('input', { type: 'email', value: 'pessoa' + (i + 1) + '@example.com', name: 'email', autocomplete: 'off', size: 22 }),
+    phone: h('input', { value: '5511987654321', name: 'phone', autocomplete: 'off', size: 14, inputmode: 'numeric' }),
+    born: b,
+  }));
+  const reference = h('input', { value: 'SDK-SEG-' + Date.now().toString(36).toUpperCase(), maxlength: 64, name: 'reference', spellcheck: 'false', autocomplete: 'off' });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  const slack = h('input', { value: '', placeholder: '0.00', size: 6, inputmode: 'decimal', name: 'max_price_increase_percent', autocomplete: 'off', title: 'Aumento de preço aceito sem nova pergunta, em %' });
+  let scenario = 'ok';
+  let token = offer.offer_token;
+  const issue = (e) => busy(e.target, async () => {
+    const booking = {
+      offer_token: token, reference: reference.value,
+      passengers: people.map((p) => ({
+        first_name: p.first.value, last_name: p.last.value, birth_date: p.born, document_kind: 'cpf', document: p.doc.value, email: p.email.value, phone: p.phone.value, nationality: 'BR',
+        address: { street: 'Rua das Acácias', number: '120', district: 'Jardim Paulista', city: 'São Paulo', state: 'SP', postal_code: '01411000', country: 'BR' },
+      })),
+    };
+    if (slack.value.trim()) booking.accept_changes = { max_price_increase_percent: slack.value.trim() };
+    const r = await api('POST', '/v1/insurances/bookings', { body: booking, headers: { 'Idempotency-Key': key.value, ...scenarioHeader(scenario) }, label: 'emitir seguro' });
+    if (ok(r)) { closeModal(); toast(r.status === 202 ? 'Sem resposta do parceiro: reserva pendente' : r.status === 200 ? 'Reserva que já existia' : 'Seguro emitido'); insuranceModal(r.body.booking, reload); reload(); return; }
+    const changedOffer = r.body && r.body.error && r.body.error.offer;
+    if (changedOffer) {
+      // a única conferência do Connect: o preço mudou. Quem decide emitir pelo preço novo é quem chama
+      token = changedOffer.offer_token;
+      const c = (changedOffer.changes || [])[0] || {};
+      put(out, h('div', { class: 'alert amber' }, 'O parceiro agora cobra ', h('strong', {}, money(c.current)), ' (era ', money(c.previous), '). Nada foi emitido. Emitir de novo usa a oferta em vigor.'), errorBox(r, 'Emissão'));
+      key.value = uuid();
+      return;
+    }
+    put(out, errorBox(r, 'Emissão'));
+  });
+  return h('div', { class: 'stack' },
+    h('div', { class: 'alert ' + (changed ? 'amber' : '') }, 'Oferta: ', h('strong', {}, money(offer.price)), offer.price_in_plan_currency ? [' · ', money(offer.price_in_plan_currency)] : null, changed ? ' · o preço é outro que o da busca' : ' · mesmo preço da busca', ' · vale até ', when(offer.expires_at)),
+    h('h2', { class: 'stitle' }, ic('users'), 'Pessoas'),
+    people.map((p, i) => h('div', { class: 'row' }, field('Pessoa ' + (i + 1) + ': nome', p.first), field('Sobrenome', p.last), field('CPF', p.doc), field('E-mail', p.email), field('Telefone', p.phone), h('span', { class: 'small muted' }, 'nasc. ' + p.born))),
+    h('p', { class: 'small muted' }, 'O endereço vai com valores de exemplo. O Connect só confere o formato; o que o parceiro exige (endereço, telefone) é ele que recusa. Nada disso é guardado.'),
+    h('div', { class: 'row' }, field('Referência', reference), field('Idempotency-Key', key), field('Aumento aceito (%)', slack), field('Cenário', scenarioSelect('insuranceBook', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary', onclick: issue }, ic('check'), 'Emitir')),
+    out);
+}
+
+/** Uma reserva de seguro: o plano, os vouchers e o que dá para fazer com cada um. */
+function insuranceModal(b, reload) {
+  const body = openModal();
+  const out = h('div');
+  const redraw = (next, note) => { closeModal(); insuranceModal(next, reload); if (note) toast(note); reload(); };
+  const path = '/v1/insurances/bookings/' + b.id;
+  const refresh = (e) => busy(e.target, async () => {
+    const r = await api('GET', path, { query: { refresh: 'true' }, label: 'consultar no parceiro' });
+    if (ok(r)) redraw(r.body.booking, r.body.booking.refreshed ? 'Lido agora no parceiro' : 'O parceiro não devolveu a emissão: mostrado como está guardado'); else put(out, errorBox(r, 'Consulta'));
+  });
+  const cancelAll = (e) => {
+    if (!confirm('Cancelar todos os vouchers da reserva ' + (b.locator || b.id) + ' no parceiro?')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', path + '/cancel', { body: {}, headers: { 'Idempotency-Key': uuid() }, label: 'cancelar seguro' });
+      if (ok(r)) redraw(r.body.booking, 'Reserva cancelada'); else put(out, errorBox(r, 'Cancelamento'));
+    });
+  };
+  const voucherRow = (v) => {
+    const newStart = h('input', { type: 'date', value: v.start_date || '', name: 'new_start' });
+    const email = h('input', { type: 'email', placeholder: 'pessoa@example.com', name: 'email', size: 22, autocomplete: 'off' });
+    const vp = path + '/vouchers/' + encodeURIComponent(v.code);
+    const cancelOne = (e) => {
+      if (!confirm('Cancelar o voucher ' + v.code + ' no parceiro?')) return;
+      busy(e.target, async () => {
+        const r = await api('POST', vp + '/cancel', { body: {}, headers: { 'Idempotency-Key': uuid() }, label: 'cancelar voucher' });
+        if (ok(r)) redraw(r.body.booking, 'Voucher cancelado'); else put(out, errorBox(r, 'Cancelamento do voucher'));
+      });
+    };
+    const shift = (e) => busy(e.target, async () => {
+      const r = await api('POST', vp + '/shift-start', { body: { new_start: newStart.value }, headers: { 'Idempotency-Key': uuid() }, label: 'mudar início' });
+      if (!ok(r)) { put(out, errorBox(r, 'Mudança de início')); return; }
+      const again = await api('GET', path, { label: 'consultar seguro' });
+      if (ok(again)) redraw(again.body.booking, 'Início da vigência alterado');
+    });
+    const resend = (e) => busy(e.target, async () => {
+      const r = await api('POST', vp + '/resend', { body: { email: email.value }, label: 'reenviar voucher' });
+      if (ok(r)) { toast('O parceiro aceitou o pedido de reenvio'); put(out); } else put(out, errorBox(r, 'Reenvio'));
+    });
+    const inForce = v.status !== 'cancelled' && b.status === 'confirmed';
+    return h('div', { class: 'card' },
+      h('div', { class: 'head' }, h('div', {}, badge(v.status, v.status === 'cancelled' ? '' : 'green'), ' ', h('span', { class: 'mono' }, v.code), ' · pessoa ', v.passenger_index + 1,
+        h('div', { class: 'small muted' }, v.start_date ? day(v.start_date) + ' → ' + day(v.end_date) : '', v.policy_code ? ' · certificado ' + v.policy_code : '', insuranceParts(v.price_breakdown) ? ' · ' + insuranceParts(v.price_breakdown) : '')),
+        h('strong', {}, money(v.price))),
+      inForce ? h('div', { class: 'row' }, field('Novo início', newStart), h('button', { onclick: shift }, ic('calendar'), 'Mudar início'), field('Reenviar para', email), h('button', { onclick: resend }, ic('send'), 'Reenviar'), h('button', { class: 'danger', onclick: cancelOne }, ic('times-circle'), 'Cancelar voucher')) : null);
+  };
+  const p = b.plan;
+  frame(body,
+    title('shield', 'Seguro ', badge(b.status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, b.locator) : ''),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', b.integration), h('span', {}, ic('calendar'), ' ', day(b.start_date) + ' → ' + day(b.end_date)), h('span', {}, ic('wallet'), ' ', money(p.price))),
+    (b.warnings || []).map((w) => h('div', { class: 'alert amber' }, BOOKING_WARNINGS[w] || w)),
+    b.failure ? h('div', { class: 'alert red' }, 'Não emitida: ', b.failure.code, b.failure.supplier_message ? ' · ' + [b.failure.supplier_code, b.failure.supplier_message].filter(Boolean).join(' ') : '') : null,
+    h('dl', { class: 'kv' },
+      h('dt', {}, 'id'), h('dd', { class: 'mono' }, b.id),
+      h('dt', {}, 'Parceiro'), h('dd', {}, b.integration + ' · ', h('span', { class: 'mono' }, b.credential)),
+      h('dt', {}, 'Referência'), h('dd', {}, b.reference || '—'),
+      h('dt', {}, 'Destino'), h('dd', {}, (b.destination_countries || []).join(', '), b.origin_country ? ' · residência ' + b.origin_country : ''),
+      h('dt', {}, 'Idades'), h('dd', {}, (b.ages || []).join(', ')),
+      h('dt', {}, 'Plano'), h('dd', {}, p.plan_name, ' · ', h('span', { class: 'mono' }, [p.plan_code, p.rate_code].filter(Boolean).join(' · ')), ' · ', p.plan_kind, p.modality ? ' (' + p.modality + ')' : '', p.region ? ' · ' + p.region : '', p.supplier_region ? ' (' + p.supplier_region + ')' : ''),
+      h('dt', {}, 'Preço'), h('dd', {}, money(p.price), p.price_in_plan_currency ? [' · ', money(p.price_in_plan_currency)] : null, (b.exchange_rate || p.exchange_rate) ? ' · câmbio ' + (b.exchange_rate || p.exchange_rate) : '', p.net_rate ? ' · net' : ' · bruto', p.commission ? ' · comissão ' + money(p.commission) : ''),
+      insuranceParts(p.price_breakdown) ? [h('dt', {}, 'Partes do preço'), h('dd', {}, insuranceParts(p.price_breakdown))] : null,
+      (p.taxes || []).length ? [h('dt', {}, 'Impostos'), h('dd', {}, p.taxes.map((t) => t.kind + ' ' + money(t.amount) + (t.included ? ' (incluso)' : '')).join(' · '))] : null,
+      h('dt', {}, 'Cancelamento sem custo'), h('dd', {}, p.cancel_policy && p.cancel_policy.free_until ? 'até ' + when(p.cancel_policy.free_until) : 'o parceiro não informou'),
+      b.issued_at ? [h('dt', {}, 'Emitida'), h('dd', {}, when(b.issued_at))] : null,
+      b.cancellation ? [h('dt', {}, 'Cancelada'), h('dd', {}, when(b.cancellation.cancelled_at) + ' · por ' + b.cancellation.by)] : null),
+    h('h2', { class: 'stitle' }, ic('ticket'), 'Vouchers'),
+    (b.vouchers || []).length ? h('div', { class: 'stack' }, b.vouchers.map(voucherRow)) : h('div', { class: 'empty' }, 'Nenhum voucher: o parceiro ainda não confirmou a emissão.'),
+    h('h2', { class: 'stitle' }, ic('bolt'), 'Ações'),
+    h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, 'Cada ação é uma permissão própria da chave no produto insurance: retrieve, cancel, cancel_passenger, shift_start e resend_voucher. O Connect não calcula reembolso: vale a política congelada na reserva.'),
+      h('div', { class: 'row' }, h('button', { onclick: refresh }, ic('refresh'), 'Consultar no parceiro'), b.status === 'confirmed' ? h('button', { class: 'danger', onclick: cancelAll }, ic('times-circle'), 'Cancelar a reserva inteira') : null)),
+    out, jsonBlock(b));
+  titleModal(body);
+}
+
 async function viewCards() {
   const st = (S.cards ||= { environment: (S.me && S.me.environment) || 'sandbox', status: '', loose: false, items: [], cursor: null, loaded: false });
   const tableBox = h('div');

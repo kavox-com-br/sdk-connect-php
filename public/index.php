@@ -39,6 +39,7 @@ $v = (string) max(filemtime(__DIR__ . '/app.js'), filemtime(__DIR__ . '/app.css'
       <span class="group">Produtos</span>
       <a href="#/hotel" data-tab="hotel"><i class="pi pi-building" aria-hidden="true"></i>Hotel</a>
       <a href="#/reservas" data-tab="reservas"><i class="pi pi-calendar" aria-hidden="true"></i>Reservas</a>
+      <a href="#/seguro" data-tab="seguro"><i class="pi pi-shield" aria-hidden="true"></i>Seguro viagem</a>
       <a href="#/cartoes" data-tab="cartoes"><i class="pi pi-credit-card" aria-hidden="true"></i>Cartões virtuais</a>
       <span class="group">Gestão</span>
       <a href="#/credenciais" data-tab="credenciais"><i class="pi pi-lock" aria-hidden="true"></i>Credenciais</a>

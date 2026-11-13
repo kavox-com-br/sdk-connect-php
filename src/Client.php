@@ -280,6 +280,102 @@ final class Client
         return $this->post('/v1/vcns/' . rawurlencode($vcnId) . '/cancel', [], $idempotencyKey);
     }
 
+    // ---------- seguro viagem (/v1/insurances) ----------
+
+    /** Países, com a região de preço e a marca Schengen. Não chama parceiro. @return array<string, mixed> */
+    public function insuranceCountries(): array
+    {
+        return $this->get('/v1/insurances/countries');
+    }
+
+    /**
+     * Busca planos numa integração. $trip: destination_countries (ISO alfa-2), start_date, end_date (os dois
+     * dias cobertos), ages (uma idade por pessoa, no primeiro dia) e, opcionais, origin_country, currency,
+     * language, credential. O Connect não filtra: todo plano que o parceiro respondeu vem, marcado
+     * (plan_kind, passengers[].not_covered). Cada plano traz o rate_token da cotação.
+     *
+     * @param array<string, mixed> $trip
+     * @return array<string, mixed>
+     */
+    public function insuranceSearch(string $integration, array $trip): array
+    {
+        return $this->post('/v1/insurances/search', ['integration' => $integration] + $trip);
+    }
+
+    /**
+     * Cota um plano para as pessoas reais: uma data de nascimento por pessoa, na ordem de `ages` da busca.
+     * Responde `offer.offer_token`, o único token que a emissão aceita, e `changed` (o preço é outro).
+     *
+     * @param list<string> $birthDates YYYY-MM-DD
+     * @return array<string, mixed>
+     */
+    public function insuranceQuote(string $rateToken, array $birthDates): array
+    {
+        return $this->post('/v1/insurances/quote', ['rate_token' => $rateToken, 'birth_dates' => $birthDates]);
+    }
+
+    /** Lista completa de coberturas de um plano. $token: rate_token ou offer_token. @return array<string, mixed> */
+    public function insuranceCoverages(string $token, ?string $language = null): array
+    {
+        return $this->post('/v1/insurances/coverages', array_filter(['token' => $token, 'language' => $language]));
+    }
+
+    /** Opcionais vendidos sobre um plano, com preço por pessoa. @return array<string, mixed> */
+    public function insuranceAddons(string $token): array
+    {
+        return $this->post('/v1/insurances/addons', ['token' => $token]);
+    }
+
+    /**
+     * Emite um voucher por pessoa. $booking: offer_token, passengers (first_name, last_name, birth_date igual à
+     * cotada, document_kind cpf|passport, document e o que o parceiro exigir: email, phone, address) e,
+     * opcionais, reference e accept_changes.max_price_increase_percent. O Connect confere uma coisa só antes
+     * de emitir, o preço: se subiu, responde 409 PRICE_CHANGED com `error.offer.offer_token`. Guarde a
+     * $idempotencyKey: repetir com ela devolve a mesma reserva. Nada de pessoa é guardado no Connect.
+     *
+     * @param array<string, mixed> $booking
+     * @return array<string, mixed>
+     */
+    public function insuranceBook(array $booking, string $idempotencyKey): array
+    {
+        return $this->post('/v1/insurances/bookings', $booking, $idempotencyKey);
+    }
+
+    /** A reserva de seguro; com $refresh, os vouchers lidos antes no parceiro. @return array<string, mixed> */
+    public function insuranceBooking(string $bookingId, bool $refresh = false): array
+    {
+        return $this->get('/v1/insurances/bookings/' . rawurlencode($bookingId), $refresh ? ['refresh' => 'true'] : []);
+    }
+
+    /** Cancela todos os vouchers da reserva no parceiro. @return array<string, mixed> */
+    public function insuranceCancel(string $bookingId, string $idempotencyKey): array
+    {
+        return $this->post('/v1/insurances/bookings/' . rawurlencode($bookingId) . '/cancel', [], $idempotencyKey);
+    }
+
+    /** Cancela o voucher de uma pessoa; a reserva segue confirmada. @return array<string, mixed> */
+    public function insuranceCancelVoucher(string $bookingId, string $voucherCode, string $idempotencyKey): array
+    {
+        return $this->post($this->voucherPath($bookingId, $voucherCode) . '/cancel', [], $idempotencyKey);
+    }
+
+    /** Pede ao parceiro para mover o primeiro dia de cobertura de um voucher. @return array<string, mixed> */
+    public function insuranceShiftStart(string $bookingId, string $voucherCode, string $newStart, string $idempotencyKey): array
+    {
+        return $this->post($this->voucherPath($bookingId, $voucherCode) . '/shift-start', ['new_start' => $newStart], $idempotencyKey);
+    }
+
+    /** Pede ao parceiro que reenvie a própria confirmação dele ao e-mail informado. @return array<string, mixed> */
+    public function insuranceResendVoucher(string $bookingId, string $voucherCode, string $email): array
+    {
+        return $this->post($this->voucherPath($bookingId, $voucherCode) . '/resend', ['email' => $email]);
+    }
+
+    private function voucherPath(string $bookingId, string $voucherCode): string
+    {
+        return '/v1/insurances/bookings/' . rawurlencode($bookingId) . '/vouchers/' . rawurlencode($voucherCode);
+    }
+
     /**
      * Cota a alteração de uma reserva confirmada: como ela ficaria com outra estadia. Não muda nada. $rooms é a
      * ocupação inteira desejada, no mesmo número e ordem dos quartos reservados; para trocar só os nomes dos
