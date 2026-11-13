@@ -30,6 +30,12 @@ const OPTION_LABELS = {
   card_mode: { request: 'Enviado no pedido de reserva', vcn: 'Cartão virtual (VCN)', fixed_card: 'Cartão fixo cadastrado aqui' },
   vcn_holder: { guest: 'O titular da reserva', fixed: 'Sempre o mesmo nome' },
 };
+// o localizador como se lê: parceiro cujo localizador é um identificador composto ("hotel=…&id=RES…&in=…")
+// mostra o número da reserva que vai dentro dele
+const locatorText = (b) => {
+  const loc = (b && b.locator) || '', n = (b && b.confirmation_number) || '';
+  return n && loc !== n && loc.includes('=') && loc.includes(n) ? n : loc;
+};
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
 const STATUS_TONE = { active: 'green', confirmed: 'green', ok: 'green', paused: 'amber', pending: 'amber', needs_review: 'amber', invalid: 'red', failed: 'red', revoked: 'red', cancelled: '', expired: 'red' };
 
@@ -1117,7 +1123,7 @@ function drawBooking(body, b, raw, note) {
   const penalty = h('input', { placeholder: 'ex.: 0.00…', size: 8, inputmode: 'decimal', name: 'max_penalty', autocomplete: 'off' });
   const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
   const cancel = async (e) => {
-    if (!confirm('Cancelar a reserva ' + (b.locator || b.id) + ' no parceiro?')) return;
+    if (!confirm('Cancelar a reserva ' + (locatorText(b) || b.id) + ' no parceiro?')) return;
     await busy(e.target, async () => {
       const bodyReq = penalty.value ? { max_penalty: { amount: penalty.value, currency: (b.rate && b.rate.net.currency) || 'BRL' } } : {};
       const r = await api('POST', '/v1/hotels/bookings/' + b.id + '/cancel', { body: bodyReq, headers: { 'Idempotency-Key': key.value, ...(b.integration === 'mock' ? mockHeader(cancelScenario) : {}) }, label: 'cancelar reserva' });
@@ -1139,7 +1145,7 @@ function drawBooking(body, b, raw, note) {
     actions.append(h('div', { class: 'row' }, h('button', { onclick: retrieve }, 'Consultar de novo')));
   }
   frame(body,
-    title('calendar', 'Reserva ', badge(b.status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, b.locator) : ''),
+    title('calendar', 'Reserva ', badge(b.status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, locatorText(b)) : ''),
     h('div', { class: 'sub' }, h('span', {}, ic('building'), ' ', ht ? ht.name : (b.supplier_hotel_id || '')), h('span', {}, ic('calendar'), ' ', day(b.check_in) + ' → ' + day(b.check_out)), h('span', {}, ic('link'), ' ', b.integration)),
     note ? h('div', { class: 'alert blue' }, note) : '',
     warnings.map((w) => h('div', { class: 'alert amber' }, h('strong', {}, w.code), w.offer ? ' — preço agora ' + money(w.offer.rate && w.offer.rate.net) : '')),
@@ -1151,7 +1157,7 @@ function drawBooking(body, b, raw, note) {
         h('dt', {}, 'Hotel'), h('dd', {}, ht ? ht.name : '', h('div', { class: 'mono small muted' }, b.hotel_id || b.supplier_hotel_id)),
         h('dt', {}, 'Integração'), h('dd', {}, b.integration + ' · ', h('span', { class: 'mono' }, b.credential)),
         h('dt', {}, 'Referência'), h('dd', {}, b.reference || '—'),
-        h('dt', {}, 'Localizador'), h('dd', { class: 'mono' }, b.locator || '—'),
+        h('dt', {}, 'Localizador'), h('dd', { class: 'mono' }, locatorText(b) || '—'),
         h('dt', {}, 'Confirmação'), h('dd', { class: 'mono' }, b.confirmation_number || '—'),
         h('dt', {}, 'Estadia'), h('dd', {}, day(b.check_in) + ' → ' + day(b.check_out)),
         h('dt', {}, 'Quartos'), h('dd', {}, (b.rooms || []).map((x) => x.adults + ' ad.' + (x.children_ages && x.children_ages.length ? ' + ' + x.children_ages.length + ' cr.' : '')).join(' · ')),
@@ -1291,7 +1297,7 @@ async function viewBookings() {
   const draw = () => put(tableBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
     h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Referência', 'Hotel', 'Estadia', 'Parceiro', 'Pagamento', 'Total'].map((t) => h('th', {}, t)))),
     h('tbody', {}, st.items.map((b) => h('tr', { class: 'click', tabindex: 0, onclick: () => bookingModal({ booking: b }), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); bookingModal({ booking: b }); } } },
-      h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status)), h('td', {}, b.reference || '—', h('div', { class: 'mono small muted' }, b.locator || '')),
+      h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status)), h('td', {}, b.reference || '—', h('div', { class: 'mono small muted' }, locatorText(b))),
       h('td', {}, (S.hotels[b.hotel_id] || {}).name || h('span', { class: 'mono small' }, b.supplier_hotel_id)),
       h('td', { class: 'nowrap' }, day(b.check_in) + ' → ' + day(b.check_out)), h('td', {}, b.integration), h('td', { class: 'nowrap' }, bookingPaymentText(b) || '—', (b.warnings || []).some((w) => w === 'vcn_update_failed' || w === 'vcn_cancel_failed') ? [' ', badge('VCN com problema', 'amber')] : null), h('td', { class: 'nowrap' }, b.rate ? money(b.rate.net) : '—'))))),
   st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhuma reserva com esses filtros.'));
