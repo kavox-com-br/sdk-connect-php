@@ -24,6 +24,12 @@ const BOOKING_WARNINGS = {
   modification_unconfirmed: 'Uma alteração foi enviada e o parceiro não respondeu com clareza: a reserva pode já estar alterada lá. Repita a alteração com a mesma Idempotency-Key.',
 };
 const CARD_SOURCES = { request: 'cartão do pedido', vcn: 'VCN', fixed: 'cartão fixo' };
+// os valores de um select da credencial são códigos do catálogo; os conhecidos são ditos em palavras
+const OPTION_LABELS = {
+  card_accept: { no: 'Não aceitar: a reserva é recusada', yes: 'Aceitar' },
+  card_mode: { request: 'Enviado no pedido de reserva', vcn: 'Cartão virtual emitido por uma integração', fixed_card: 'Cartão fixo cadastrado aqui' },
+  vcn_holder: { guest: 'O titular da reserva', fixed: 'Sempre o mesmo nome' },
+};
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
 const STATUS_TONE = { active: 'green', confirmed: 'green', ok: 'green', paused: 'amber', pending: 'amber', needs_review: 'amber', invalid: 'red', failed: 'red', revoked: 'red', cancelled: '', expired: 'red' };
 
@@ -375,7 +381,7 @@ async function credentialForm(c, reload) {
       const current = c && c.fields ? c.fields[f.key] : undefined;
       let input;
       if (f.type === 'select') {
-        input = h('select', {}, f.required ? null : opt('', '—'), (f.options || []).map((o) => opt(o, o, (current ?? f.default) === o)));
+        input = h('select', {}, f.required ? null : opt('', '—'), (f.options || []).map((o) => opt(o, (OPTION_LABELS[f.key] || {})[o] || o, (current ?? f.default) === o)));
       } else if (f.type === 'credential') {
         const choices = others.filter((x) => x.environment === env.value && serves(x.integration, f.product));
         input = h('select', {}, opt('', choices.length ? '—' : 'nenhuma credencial de ' + f.product + ' neste ambiente'), choices.map((x) => opt(x.id, x.name + ' · ' + x.integration, current === x.id)));
@@ -393,7 +399,8 @@ async function credentialForm(c, reload) {
       return { f, row, input };
     });
     // campo condicional (show_when): só aparece, e só é enviado, quando os campos de que depende têm o valor pedido
-    const applies = (f) => Object.entries(f.show_when || {}).every(([k, want]) => inputs[k] && inputs[k].input.value === want);
+    // e valem eles mesmos (a origem do cartão só conta enquanto a tarifa só cartão é aceita)
+    const applies = (f) => Object.entries(f.show_when || {}).every(([k, want]) => inputs[k] && inputs[k].input.value === want && applies(inputs[k].f));
     const sync = () => rows.forEach(({ f, row, input }) => {
       const on = applies(f);
       row.hidden = !on;
@@ -401,7 +408,7 @@ async function credentialForm(c, reload) {
     });
     rows.forEach(({ input }) => input.addEventListener('change', sync));
     const groups = [...new Set(rows.map(({ f }) => f.group || ''))];
-    const GROUPS = { card: 'Cartão na reserva (só para tarifa que só aceita cartão)' };
+    const GROUPS = { card: 'Cartão na reserva (tarifa de hotel que só aceita cartão)' };
     put(fieldsBox, ...groups.flatMap((g) => [g ? h('h3', { style: 'grid-column:1/-1' }, ic('credit-card'), ' ', GROUPS[g] || g) : null, ...rows.filter(({ f }) => (f.group || '') === g).map(({ row }) => row)].filter(Boolean)));
     sync();
     fieldsBox.applies = applies;

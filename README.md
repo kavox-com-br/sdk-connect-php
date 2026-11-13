@@ -99,7 +99,8 @@ $api->cancel($id, Client::uuid());
 
 // tarifa que só aceita cartão (rate.payment.methods = ['credit_card']): o cartão vai em payment.card. Sem
 // ele, vale o que a credencial do parceiro de hotel faz (emitir um cartão virtual ou usar o cartão fixo);
-// sem nenhum dos dois, 422 CARD_REQUIRED. A resposta diz como foi paga em booking.payment, nunca o número
+// sem nenhum dos dois, 422 CARD_REQUIRED. A credencial precisa aceitar esse tipo de tarifa (card_accept = yes):
+// sem isso, 422 CARD_REQUIRED com reason card_rates_not_accepted, mesmo com cartão no pedido. A resposta diz como foi paga em booking.payment, nunca o número
 $api->book(['offer_token' => $token, 'rooms' => $rooms, 'payment' => ['card' => [
     'holder_name' => 'MARIA SOUZA', 'number' => '5555555555554444', 'expiry_month' => 2, 'expiry_year' => 2030, 'cvv' => '123',
 ]]], Client::uuid());
