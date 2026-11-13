@@ -837,7 +837,7 @@ function hotelCard(x, integration) {
       h('tbody', {}, x.rates.map((r) => h('tr', {},
         h('td', {}, r.room_name, r.rate_name ? h('div', { class: 'small' }, r.rate_name) : null, r.bed_description ? h('div', { class: 'muted small' }, r.bed_description) : null, promoTags(r), paymentLine(r)),
         h('td', {}, BOARDS[r.board] || r.board, r.board_name ? h('div', { class: 'muted small' }, r.board_name) : null),
-        h('td', { class: 'net nowrap' }, money(r.net), r.payable ? h('div', { class: 'muted small' }, 'a pagar ' + money(r.payable)) : null, r.commission ? h('div', { class: 'small' }, badge('comissionada', 'blue')) : null),
+        h('td', { class: 'net nowrap' }, money(r.net), r.payable ? h('div', { class: 'muted small' }, 'a pagar ' + money(r.payable)) : null, commissionTag(r)),
         h('td', { class: 'small' }, policyText(r.cancellation_policy)),
         h('td', { class: 'small' }, (r.taxes || []).map((t) => h('div', {}, t.type, ' ', h('span', { class: 'muted' }, t.charge), t.amount ? ' ' + money(t.amount) : ''))),
         h('td', {}, h('button', { class: 'sm primary', onclick: (e) => busy(e.target, () => quote(r.rate_token, x)) }, ic('calculator'), 'Cotar'))))))));
@@ -846,6 +846,15 @@ function hotelCard(x, integration) {
 /** O símbolo da Kavox nos estados vazios. */
 const emptyMark = () => h('img', { class: 'mark', src: 'brand/icon.png', alt: '', width: 40, height: 40 });
 const placeholder = () => h('div', { class: 'ph', title: 'Sem foto no catálogo' }, h('img', { src: 'brand/icon.png', alt: '', width: 28, height: 28 }));
+
+/** Tarifa comissionada: o percentual e o valor da comissão, como o parceiro informa, e como ela é acertada. */
+function commissionTag(r) {
+  const c = r && r.commission;
+  if (!c) return null;
+  const text = ['comissionada', c.percent ? Number(c.percent).toLocaleString('pt-BR') + '%' : null].filter(Boolean).join(' ') + (c.amount ? ' · ' + money(c.amount) : '');
+  const how = c.settlement === 'deducted' ? 'já descontada: o parceiro cobra o net' : c.settlement === 'paid_later' ? 'paga depois: a conta paga ' + money(c.gross) + ' e a comissão volta' : '';
+  return h('div', { class: 'small', title: 'Preço cheio ' + money(c.gross) + (how ? ' · ' + how : '') }, badge(text, 'blue'));
+}
 
 /** As promoções da tarifa, como etiquetas: só o nome que o parceiro deu. O preço não muda por causa delas. */
 function promoTags(r) {
@@ -959,7 +968,7 @@ function offerBox(o) {
       r.promotions && r.promotions.length ? [h('dt', {}, 'Promoções'), h('dd', {}, promoTags(r))] : null,
       r.payable ? [h('dt', {}, 'A pagar'), h('dd', {}, money(r.payable))] : null,
       r.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(r), r.payment.prepayment && r.payment.prepayment.description ? h('div', { class: 'muted small' }, r.payment.prepayment.description) : null)] : null,
-      r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount || r.commission.gross), ' ', r.commission.settlement || '')] : null,
+      r.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, money(r.commission.amount), r.commission.percent ? ' (' + Number(r.commission.percent).toLocaleString('pt-BR') + '%)' : '', ' sobre ' + money(r.commission.gross), ' · ', r.commission.settlement === 'paid_later' ? 'paga depois' : r.commission.settlement === 'deducted' ? 'já descontada' : (r.commission.settlement || ''))] : null,
       r.sale_price ? [h('dt', {}, 'Preço de venda'), h('dd', {}, money(r.sale_price.amount || r.sale_price), r.sale_price.binding ? ' (obrigatório)' : '')] : null,
       o.rate.available !== undefined ? [h('dt', {}, 'Disponíveis'), h('dd', {}, o.rate.available)] : null),
     h('div', {},
@@ -1073,6 +1082,7 @@ function drawBooking(body, b, raw, note) {
         h('dt', {}, 'Estadia'), h('dd', {}, day(b.check_in) + ' → ' + day(b.check_out)),
         h('dt', {}, 'Quartos'), h('dd', {}, (b.rooms || []).map((x) => x.adults + ' ad.' + (x.children_ages && x.children_ages.length ? ' + ' + x.children_ages.length + ' cr.' : '')).join(' · ')),
         b.rate ? [h('dt', {}, 'Tarifa'), h('dd', {}, b.rate.room_name, b.rate.rate_name ? ' · ' + b.rate.rate_name : '', ' · ', BOARDS[b.rate.board] || b.rate.board, ' · ', h('strong', {}, money(b.rate.net)))] : null,
+        b.rate && b.rate.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, commissionTag(b.rate))] : null,
         b.rate && b.rate.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(b.rate))] : null,
         h('dt', {}, 'Criada'), h('dd', {}, when(b.created_at)),
         b.modified_at ? [h('dt', {}, 'Alterada'), h('dd', {}, when(b.modified_at))] : null),
