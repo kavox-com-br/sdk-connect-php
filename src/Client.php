@@ -213,7 +213,12 @@ final class Client
      * Reserva a oferta de uma cotação. Guarde a $idempotencyKey: repetir com ela, depois de um timeout,
      * devolve a mesma reserva em vez de reservar de novo.
      *
-     * @param array<string, mixed> $booking offer_token, holder, rooms[].guests, reference...
+     * Tarifa que só aceita cartão (`rate.payment.methods` = ['credit_card']): mande o cartão em
+     * $booking['payment']['card'] (holder_name, number, expiry_month, expiry_year, cvv), ou deixe sem ele
+     * quando a credencial do parceiro de hotel emite cartão virtual ou tem cartão fixo. Sem nenhum dos dois,
+     * 422 CARD_REQUIRED. A reserva responde como foi paga em `booking.payment`.
+     *
+     * @param array<string, mixed> $booking offer_token, holder, rooms[].guests, reference, payment...
      * @return array<string, mixed>
      */
     public function book(array $booking, string $idempotencyKey): array
@@ -236,6 +241,43 @@ final class Client
     public function cancel(string $bookingId, string $idempotencyKey, array $body = []): array
     {
         return $this->post('/v1/hotels/bookings/' . rawurlencode($bookingId) . '/cancel', $body, $idempotencyKey);
+    }
+
+    /**
+     * Emite um cartão virtual (produto `vcn`). O número e o código de segurança vêm em `card` só nesta
+     * resposta: o Connect não os guarda. Guarde a $idempotencyKey: repetir com ela devolve o mesmo cartão,
+     * sem o número.
+     *
+     * @param array<string, mixed> $card integration, holder_name, limit, active_from, valid_until, use...
+     * @return array<string, mixed>
+     */
+    public function issueVcn(array $card, string $idempotencyKey): array
+    {
+        return $this->post('/v1/vcns', $card, $idempotencyKey);
+    }
+
+    /** O cartão como o Connect o tem; com $refresh, lido antes no emissor. @return array<string, mixed> */
+    public function vcn(string $vcnId, bool $refresh = false): array
+    {
+        return $this->get('/v1/vcns/' . rawurlencode($vcnId), $refresh ? ['refresh' => 'true'] : []);
+    }
+
+    /**
+     * Muda limite, período, portador e os dados da estadia. Mande o cartão inteiro, como na emissão e sem
+     * `integration`: o que continua igual é repetido.
+     *
+     * @param array<string, mixed> $card
+     * @return array<string, mixed>
+     */
+    public function updateVcn(string $vcnId, array $card): array
+    {
+        return $this->request('PATCH', '/v1/vcns/' . rawurlencode($vcnId), [], $card);
+    }
+
+    /** Inutiliza o cartão no emissor, para sempre. @return array<string, mixed> */
+    public function cancelVcn(string $vcnId, string $idempotencyKey): array
+    {
+        return $this->post('/v1/vcns/' . rawurlencode($vcnId) . '/cancel', [], $idempotencyKey);
     }
 
     /**

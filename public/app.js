@@ -5,20 +5,25 @@
 // ---------- base ----------
 
 const SCENARIOS = {
-  search: ['ok', 'empty', 'non_refundable', 'credential', 'unavailable', 'timeout', 'slow'],
-  quote: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'non_refundable', 'notice_added', 'credential', 'unavailable', 'timeout', 'slow'],
-  book: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'pending_fail', 'pending_stuck', 'notice_added', 'credential', 'unavailable', 'timeout', 'slow'],
+  search: ['ok', 'empty', 'non_refundable', 'card_only', 'credential', 'unavailable', 'timeout', 'slow'],
+  quote: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'non_refundable', 'notice_added', 'card_only', 'credential', 'unavailable', 'timeout', 'slow'],
+  book: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'pending_fail', 'pending_stuck', 'notice_added', 'card_only', 'card_only_refused', 'card_only_pending', 'card_only_vcn_refused', 'credential', 'unavailable', 'timeout', 'slow'],
   retrieve: ['ok', 'credential', 'unavailable', 'timeout', 'slow'],
   cancel: ['ok', 'validation', 'cancel_penalty', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
   modifyQuote: ['ok', 'no_availability', 'price_changed', 'credential', 'unavailable', 'timeout', 'slow'],
   modify: ['ok', 'no_availability', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+  vcnIssue: ['ok', 'validation', 'credential', 'unavailable', 'timeout', 'slow'],
 };
 const PAYMENT_METHODS = { invoice: 'faturado', voucher: 'voucher', prepay: 'pré-pagamento', deposit: 'depósito', credit_card: 'cartão de crédito' };
 const BOOKING_WARNINGS = {
   price_changed_after_booking: 'O parceiro informou outro preço depois de reservar ou alterar.',
   penalty_above_max: 'O parceiro cobrou multa acima do máximo aceito.',
+  vcn_update_failed: 'O emissor do cartão virtual não foi avisado da mudança da reserva (localizador, nova estadia ou novo limite). O cartão funciona.',
+  vcn_cancel_failed: 'O cartão virtual da reserva deveria ter sido cancelado e continua ativo no emissor: alguém precisa cancelá-lo.',
+  vcn_kept_for_penalty: 'Reserva cancelada com multa: o cartão virtual continua ativo, com o limite da multa, para o hotel cobrá-la.',
   modification_unconfirmed: 'Uma alteração foi enviada e o parceiro não respondeu com clareza: a reserva pode já estar alterada lá. Repita a alteração com a mesma Idempotency-Key.',
 };
+const CARD_SOURCES = { request: 'cartão do pedido', vcn: 'VCN', fixed: 'cartão fixo' };
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
 const STATUS_TONE = { active: 'green', confirmed: 'green', ok: 'green', paused: 'amber', pending: 'amber', needs_review: 'amber', invalid: 'red', failed: 'red', revoked: 'red', cancelled: '', expired: 'red' };
 
@@ -220,7 +225,7 @@ const stars = (n) => (n ? h('span', { class: 'stars', title: n + ' estrelas' }, 
 
 // ---------- rotas ----------
 
-const VIEWS = { hotel: viewHotel, reservas: viewBookings, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
+const VIEWS = { hotel: viewHotel, reservas: viewBookings, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
 function tab() { return (location.hash.replace(/^#\//, '') || 'hotel').split('/')[0]; }
 async function render() {
   const name = VIEWS[tab()] ? tab() : 'hotel';
@@ -359,22 +364,47 @@ async function credentialForm(c, reload) {
     put(env, ...[sch.has_sandbox !== false ? opt('sandbox', 'sandbox', c && c.environment === 'sandbox') : null, sch.has_production ? opt('production', 'production', c && c.environment === 'production') : null].filter(Boolean));
     if (!editing && !name.value) name.value = (sch.name || supplier.value) + ' ' + env.value;
     inputs = {};
-    put(fieldsBox, ...(sch.credential_schema || []).map((f) => {
+    // as credenciais da conta, para o campo que nomeia outra (o emissor do cartão virtual)
+    let others = [];
+    if ((sch.credential_schema || []).some((f) => f.type === 'credential')) {
+      const r = await api('GET', '/v1/management/integrations', { label: 'credenciais' });
+      if (ok(r)) others = (r.body.data || []).flatMap((it) => it.credentials.map((x) => ({ ...x, integration: it.integration })));
+    }
+    const serves = (code, product) => ((S.suppliers || []).find((x) => x.code === code) || { products: [] }).products.includes(product);
+    const rows = (sch.credential_schema || []).map((f) => {
       const current = c && c.fields ? c.fields[f.key] : undefined;
       let input;
       if (f.type === 'select') {
         input = h('select', {}, f.required ? null : opt('', '—'), (f.options || []).map((o) => opt(o, o, (current ?? f.default) === o)));
+      } else if (f.type === 'credential') {
+        const choices = others.filter((x) => x.environment === env.value && serves(x.integration, f.product));
+        input = h('select', {}, opt('', choices.length ? '—' : 'nenhuma credencial de ' + f.product + ' neste ambiente'), choices.map((x) => opt(x.id, x.name + ' · ' + x.integration, current === x.id)));
       } else {
         input = h('input', {
           type: f.secret ? 'password' : 'text', autocomplete: 'off',
-          value: f.secret ? '' : (current ?? (editing ? '' : f.default ?? '')),
-          placeholder: f.secret && editing ? 'vazio mantém o atual (' + (current || '••••') + ')' : (f.default || ''),
-          required: f.required && !(f.secret && editing),
+          value: f.secret ? '' : (current ?? (editing && !f.show_when && !f.group ? '' : f.default ?? '')),
+          placeholder: f.secret && editing ? 'vazio mantém o atual (' + (current || '••••') + ')' : (f.type === 'month' ? 'MM/AAAA' : f.default || ''),
+          inputmode: f.type === 'card' || f.type === 'month' ? 'numeric' : undefined,
         });
       }
       inputs[f.key] = { input, f };
-      return field(f.label_pt + (f.required ? ' *' : ''), input);
-    }));
+      const row = field(f.label_pt + (f.required ? ' *' : ''), input);
+      if (f.help_pt) row.title = f.help_pt;
+      return { f, row, input };
+    });
+    // campo condicional (show_when): só aparece, e só é enviado, quando os campos de que depende têm o valor pedido
+    const applies = (f) => Object.entries(f.show_when || {}).every(([k, want]) => inputs[k] && inputs[k].input.value === want);
+    const sync = () => rows.forEach(({ f, row, input }) => {
+      const on = applies(f);
+      row.hidden = !on;
+      input.required = on && f.required && !(f.secret && editing && c.fields && c.fields[f.key]);
+    });
+    rows.forEach(({ input }) => input.addEventListener('change', sync));
+    const groups = [...new Set(rows.map(({ f }) => f.group || ''))];
+    const GROUPS = { card: 'Cartão na reserva (só para tarifa que só aceita cartão)' };
+    put(fieldsBox, ...groups.flatMap((g) => [g ? h('h3', { style: 'grid-column:1/-1' }, ic('credit-card'), ' ', GROUPS[g] || g) : null, ...rows.filter(({ f }) => (f.group || '') === g).map(({ row }) => row)].filter(Boolean)));
+    sync();
+    fieldsBox.applies = applies;
   };
   supplier.addEventListener('change', () => { name.value = ''; fill(); });
 
@@ -382,6 +412,7 @@ async function credentialForm(c, reload) {
     e.preventDefault();
     const fields = {};
     for (const [k, { input, f }] of Object.entries(inputs)) {
+      if (fieldsBox.applies && !fieldsBox.applies(f)) continue; // campo que não vale não é enviado: o Connect não o guardaria
       const v = input.value.trim();
       if (v === '' && (editing || !f.required)) continue; // vazio: mantém (edição) ou não manda (opcional)
       fields[k] = v;
@@ -875,7 +906,25 @@ function paymentLine(r) {
   const text = paymentText(r);
   if (!text) return null;
   const onlyCard = r.payment.methods && r.payment.methods.length === 1 && r.payment.methods[0] === 'credit_card';
-  return h('div', { class: 'muted small', title: (r.payment.prepayment && r.payment.prepayment.description) || 'Pagamento ao parceiro, como ele informa' }, ic('credit-card'), ' ', text, onlyCard ? h('span', {}, ' ', badge('só cartão: ainda não reservável', 'amber')) : null);
+  return h('div', { class: 'muted small', title: (r.payment.prepayment && r.payment.prepayment.description) || 'Pagamento ao parceiro, como ele informa' }, ic('credit-card'), ' ', text, onlyCard ? h('span', {}, ' ', badge('só cartão', 'amber')) : null);
+}
+
+/** Como a reserva foi garantida no parceiro: o meio, o cartão (nunca o número) e o cartão virtual, quando houve. */
+function bookingPaymentText(b) {
+  const p = b && b.payment;
+  if (!p || (!p.method && !p.card)) return null;
+  const c = p.card;
+  return [c ? (CARD_SOURCES[c.source] || c.source) + (c.last4 ? ' •••• ' + c.last4 : '') : (PAYMENT_METHODS[p.method] || p.method)].join('');
+}
+function bookingPayment(b) {
+  const p = b && b.payment;
+  if (!p || (!p.method && !p.card)) return null;
+  const c = p.card;
+  const v = p.vcn;
+  return h('div', {},
+    h('div', {}, PAYMENT_METHODS[p.method] || p.method || '—', c ? [' · ', h('strong', {}, CARD_SOURCES[c.source] || c.source), c.last4 ? h('span', { class: 'mono' }, ' •••• ' + c.last4) : null, c.brand ? ' ' + c.brand : '', c.holder_name ? ' · ' + c.holder_name : ''] : null),
+    v ? h('div', { class: 'small' }, 'Cartão virtual ', badge(v.status), ' emitido por ', h('strong', {}, v.integration), ' com a credencial ', h('span', { class: 'mono' }, v.credential), v.supplier_id ? [' · id no emissor ', h('span', { class: 'mono' }, v.supplier_id)] : null,
+      h('div', { class: 'mono muted' }, v.id)) : null);
 }
 
 function policyText(p) {
@@ -995,6 +1044,20 @@ function bookingForm(offer, integration) {
   const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
   let scenario = 'ok';
   const out = h('div');
+  // o cartão de uma tarifa que só aceita cartão: vai ao parceiro nesta chamada e não é guardado em lugar nenhum
+  const methods = (offer.rate && offer.rate.payment && offer.rate.payment.methods) || [];
+  const onlyCard = methods.length === 1 && methods[0] === 'credit_card';
+  const card = {
+    holder_name: h('input', { name: 'card_holder', autocomplete: 'off', placeholder: 'MARIA SOUZA…', size: 22 }),
+    number: h('input', { name: 'card_number', autocomplete: 'off', inputmode: 'numeric', class: 'mono', placeholder: '5555 5555 5555 4444…', size: 22, spellcheck: 'false' }),
+    expiry_month: h('input', { name: 'card_month', autocomplete: 'off', inputmode: 'numeric', placeholder: 'MM…', size: 3 }),
+    expiry_year: h('input', { name: 'card_year', autocomplete: 'off', inputmode: 'numeric', placeholder: 'AAAA…', size: 5 }),
+    cvv: h('input', { name: 'card_cvv', autocomplete: 'off', inputmode: 'numeric', type: 'password', placeholder: '•••', size: 4 }),
+  };
+  const cardBox = h('details', { class: 'json', open: onlyCard },
+    h('summary', {}, 'Cartão (payment.card): só para tarifa que só aceita cartão'),
+    h('p', { class: 'small muted' }, 'Deixe vazio para usar o que a credencial do parceiro de hotel faz: emitir um cartão virtual (VCN) ou usar o cartão fixo. Sem nenhum dos dois, a reserva responde 422 CARD_REQUIRED. Em tarifa que aceita outro meio, mandar cartão é recusado.'),
+    h('div', { class: 'row' }, field('Nome no cartão', card.holder_name), field('Número', card.number), field('Mês', card.expiry_month), field('Ano', card.expiry_year), field('CVV', card.cvv)));
   const submit = async (e) => {
     e.preventDefault();
     const body = {
@@ -1004,6 +1067,9 @@ function bookingForm(offer, integration) {
       rooms: roomsInputs.map((gs) => ({ guests: gs.map((g) => (g.age === null ? { first_name: g.first.value, last_name: g.last.value } : { first_name: g.first.value, last_name: g.last.value, age: g.age })) })),
     };
     if (maxIncrease.value) body.accept_changes = { max_price_increase_percent: maxIncrease.value };
+    if (card.number.value.trim()) {
+      body.payment = { card: { holder_name: card.holder_name.value.trim(), number: card.number.value.trim(), expiry_month: Number(card.expiry_month.value) || 0, expiry_year: Number(card.expiry_year.value) || 0, cvv: card.cvv.value.trim() } };
+    }
     await busy(e.submitter, async () => {
       const r = await api('POST', '/v1/hotels/bookings', { body, headers: { 'Idempotency-Key': key.value, ...(integration === 'mock' ? mockHeader(scenario) : {}) }, label: 'reservar' });
       if (!ok(r)) { put(out, errorBox(r, 'Reserva'), r.status === 0 || (r.body && r.body.error && r.body.error.retryable) ? h('p', { class: 'small' }, 'Repita com a mesma Idempotency-Key: o Connect nunca reserva duas vezes.') : null); return; }
@@ -1016,6 +1082,7 @@ function bookingForm(offer, integration) {
     h('div', { class: 'row' }, field('Referência', reference), field('Observação', remarks), field('Aceita aumento até (%)', maxIncrease),
       integration === 'mock' ? field('Cenário', scenarioSelect('book', scenario, (v) => { scenario = v; })) : null),
     h('div', { class: 'row' }, field('Idempotency-Key', key), h('button', { type: 'button', class: 'sm', onclick: () => { key.value = uuid(); } }, 'Nova chave')),
+    cardBox,
     integration !== 'mock' ? h('div', { class: 'alert red' }, 'Integração real (' + integration + '): esta reserva vai de verdade ao parceiro.') : null,
     out, h('div', { class: 'row' }, h('button', { class: 'primary' }, ic('check'), 'Reservar')));
 }
@@ -1083,7 +1150,8 @@ function drawBooking(body, b, raw, note) {
         h('dt', {}, 'Quartos'), h('dd', {}, (b.rooms || []).map((x) => x.adults + ' ad.' + (x.children_ages && x.children_ages.length ? ' + ' + x.children_ages.length + ' cr.' : '')).join(' · ')),
         b.rate ? [h('dt', {}, 'Tarifa'), h('dd', {}, b.rate.room_name, b.rate.rate_name ? ' · ' + b.rate.rate_name : '', ' · ', BOARDS[b.rate.board] || b.rate.board, ' · ', h('strong', {}, money(b.rate.net)))] : null,
         b.rate && b.rate.commission ? [h('dt', {}, 'Comissão'), h('dd', {}, commissionTag(b.rate))] : null,
-        b.rate && b.rate.payment ? [h('dt', {}, 'Pagamento ao parceiro'), h('dd', {}, paymentText(b.rate))] : null,
+        b.rate && b.rate.payment ? [h('dt', {}, 'Meios que a tarifa aceita'), h('dd', {}, paymentText(b.rate))] : null,
+        bookingPayment(b) ? [h('dt', {}, 'Pagamento'), h('dd', {}, bookingPayment(b))] : null,
         h('dt', {}, 'Criada'), h('dd', {}, when(b.created_at)),
         b.modified_at ? [h('dt', {}, 'Alterada'), h('dd', {}, when(b.modified_at))] : null),
       h('div', {},
@@ -1202,10 +1270,10 @@ function modificationBox(body, b, quoted) {
 }
 
 async function viewBookings() {
-  const st = (S.bookings ||= { environment: (S.me && S.me.environment) || 'sandbox', status: '', reference: '', items: [], cursor: null, loaded: false });
+  const st = (S.bookings ||= { environment: (S.me && S.me.environment) || 'sandbox', status: '', reference: '', payment: '', items: [], cursor: null, loaded: false });
   const tableBox = h('div');
   const load = async (more) => {
-    const r = await api('GET', '/v1/management/bookings', { query: { environment: st.environment, status: st.status, reference: st.reference, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas' });
+    const r = await api('GET', '/v1/management/bookings', { query: { environment: st.environment, status: st.status, reference: st.reference, card_source: CARD_SOURCES[st.payment] ? st.payment : undefined, payment_method: PAYMENT_METHODS[st.payment] ? st.payment : undefined, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas' });
     if (!ok(r)) { put(tableBox, errorBox(r)); return; }
     st.items = more ? st.items.concat(r.body.data) : r.body.data;
     st.cursor = r.body.next_cursor || null;
@@ -1214,11 +1282,11 @@ async function viewBookings() {
     draw();
   };
   const draw = () => put(tableBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Referência', 'Hotel', 'Estadia', 'Parceiro', 'Total'].map((t) => h('th', {}, t)))),
+    h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Referência', 'Hotel', 'Estadia', 'Parceiro', 'Pagamento', 'Total'].map((t) => h('th', {}, t)))),
     h('tbody', {}, st.items.map((b) => h('tr', { class: 'click', tabindex: 0, onclick: () => bookingModal({ booking: b }), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); bookingModal({ booking: b }); } } },
       h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status)), h('td', {}, b.reference || '—', h('div', { class: 'mono small muted' }, b.locator || '')),
       h('td', {}, (S.hotels[b.hotel_id] || {}).name || h('span', { class: 'mono small' }, b.supplier_hotel_id)),
-      h('td', { class: 'nowrap' }, day(b.check_in) + ' → ' + day(b.check_out)), h('td', {}, b.integration), h('td', { class: 'nowrap' }, b.rate ? money(b.rate.net) : '—'))))),
+      h('td', { class: 'nowrap' }, day(b.check_in) + ' → ' + day(b.check_out)), h('td', {}, b.integration), h('td', { class: 'nowrap' }, bookingPaymentText(b) || '—', (b.warnings || []).some((w) => w === 'vcn_update_failed' || w === 'vcn_cancel_failed') ? [' ', badge('VCN com problema', 'amber')] : null), h('td', { class: 'nowrap' }, b.rate ? money(b.rate.net) : '—'))))),
   st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhuma reserva com esses filtros.'));
   const byId = h('input', { placeholder: '01a1cd35-…', class: 'mono', size: 38, name: 'booking_id', spellcheck: 'false', autocomplete: 'off', required: true });
   const open = async (e) => {
@@ -1229,6 +1297,7 @@ async function viewBookings() {
   const filters = h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); load(); } },
     field('Ambiente', h('select', { onchange: (e) => { st.environment = e.target.value; } }, opt('sandbox', 'sandbox', st.environment === 'sandbox'), opt('production', 'production', st.environment === 'production'))),
     field('Estado', h('select', { onchange: (e) => { st.status = e.target.value; } }, opt('', 'todos'), ['pending', 'confirmed', 'cancelled', 'failed', 'needs_review'].map((s) => opt(s, s, st.status === s)))),
+    field('Pagamento', h('select', { onchange: (e) => { st.payment = e.target.value; } }, opt('', 'qualquer'), Object.entries({ ...CARD_SOURCES, ...PAYMENT_METHODS }).map(([k, label]) => opt(k, label, st.payment === k)))),
     field('Referência', h('input', { value: st.reference, oninput: (e) => { st.reference = e.target.value; } })),
     h('button', { class: 'primary' }, ic('filter'), 'Filtrar'));
   // reserva lida direto no parceiro, pelo id do parceiro: a que não passou pelo Connect
@@ -1253,6 +1322,175 @@ async function viewBookings() {
     h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('calendar', 'Reservas'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/bookings); consultar e cancelar usam a de produto (/v1/hotels/bookings).')),
       h('form', { class: 'row', onsubmit: open }, field('Abrir por id', byId), h('button', {}, 'Abrir'))), filters),
     h('div', { class: 'card' }, tableBox));
+}
+
+// ---------- cartões virtuais ----------
+
+/**
+ * Cartões virtuais (produto vcn). A lista e o cancelamento "pela conta" vêm da API de gestão
+ * (/v1/management/vcns, escopos de reservas); emitir, consultar no emissor, atualizar e cancelar "pela chave"
+ * usam a de produto (/v1/vcns), que pede permissão no produto vcn. O número do cartão só existe na resposta
+ * da emissão: o Connect não o guarda.
+ */
+async function viewCards() {
+  const st = (S.cards ||= { environment: (S.me && S.me.environment) || 'sandbox', status: '', loose: false, items: [], cursor: null, loaded: false });
+  const tableBox = h('div');
+  const load = async (more) => {
+    const r = await api('GET', '/v1/management/vcns', { query: { environment: st.environment, status: st.status, loose: st.loose ? 'true' : undefined, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'cartões virtuais' });
+    if (!ok(r)) { put(tableBox, errorBox(r)); return; }
+    st.items = more ? st.items.concat(r.body.data) : r.body.data;
+    st.cursor = r.body.next_cursor || null;
+    st.loaded = true;
+    draw();
+  };
+  const loose = (c) => (c.status === 'waiting' || c.status === 'active') && (c.booking_status === 'failed' || c.booking_status === 'cancelled');
+  const draw = () => put(tableBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Emitido', 'Estado', 'Cartão', 'Limite', 'Válido até', 'Emissor', 'Reserva'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, st.items.map((c) => h('tr', { class: 'click', tabindex: 0, onclick: () => cardModal(c, load), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cardModal(c, load); } } },
+      h('td', { class: 'nowrap' }, when(c.created_at)), h('td', {}, badge(c.status)),
+      h('td', {}, h('span', { class: 'mono' }, c.last4 ? '•••• ' + c.last4 : '—'), h('div', { class: 'small muted' }, c.holder_name || '')),
+      h('td', { class: 'nowrap' }, money(c.limit)), h('td', { class: 'nowrap' }, day(c.valid_until)),
+      h('td', {}, c.integration, h('div', { class: 'mono small muted' }, c.credential)),
+      h('td', {}, c.booking_id ? [badge(c.booking_status || '—'), loose(c) ? [' ', badge('sobrou', 'amber')] : null] : h('span', { class: 'muted' }, 'avulso')))))),
+  st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhum cartão virtual com esses filtros.'));
+
+  const filters = h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); load(); } },
+    field('Ambiente', h('select', { onchange: (e) => { st.environment = e.target.value; } }, opt('sandbox', 'sandbox', st.environment === 'sandbox'), opt('production', 'production', st.environment === 'production'))),
+    field('Estado', h('select', { onchange: (e) => { st.status = e.target.value; } }, opt('', 'todos'), ['issuing', 'waiting', 'active', 'cancelled', 'failed'].map((x) => opt(x, x, st.status === x)))),
+    h('label', { class: 'f' }, 'Só os que sobraram', h('input', { type: 'checkbox', checked: st.loose, onchange: (e) => { st.loose = e.target.checked; }, title: 'Cartão ainda utilizável cuja reserva falhou ou foi cancelada' })),
+    h('button', { class: 'primary' }, ic('filter'), 'Filtrar'));
+
+  const byId = h('input', { placeholder: '01a1cd35-…', class: 'mono', size: 38, name: 'vcn_id', spellcheck: 'false', autocomplete: 'off', required: true });
+  const open = async (e) => {
+    e.preventDefault();
+    const r = await api('GET', '/v1/vcns/' + byId.value.trim(), { label: 'consultar cartão' });
+    if (ok(r)) cardModal(r.body.vcn, load); else openModal(errorBox(r, 'Cartão'));
+  };
+
+  if (!st.loaded) load(); else draw();
+  return h('div', {},
+    h('div', { class: 'card' }, h('div', { class: 'head' },
+      h('div', {}, title('credit-card', 'Cartões virtuais'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/vcns): os cartões que uma chave emitiu e os que o Connect emitiu para uma reserva. O número do cartão nunca aparece aqui: ele não é guardado.')),
+      h('div', { class: 'row' }, h('form', { class: 'row', onsubmit: open }, field('Abrir por id (/v1/vcns)', byId), h('button', {}, 'Abrir')), h('button', { class: 'primary', onclick: () => cardIssueForm(load) }, ic('plus'), 'Emitir cartão'))), filters),
+    h('div', { class: 'card' }, tableBox));
+}
+
+/** Um cartão: o que o Connect guarda dele e o que dá para fazer. */
+function cardModal(c, reload) {
+  const body = openModal();
+  const out = h('div');
+  const u = c.use || {};
+  const usable = c.status === 'waiting' || c.status === 'active';
+  const redraw = (next, note) => { closeModal(); cardModal({ booking_status: c.booking_status, ...next }, reload); if (note) toast(note); reload(); };
+  const refresh = (e) => busy(e.target, async () => {
+    const r = await api('GET', '/v1/vcns/' + c.id, { query: { refresh: 'true' }, label: 'consultar no emissor' });
+    if (ok(r)) redraw(r.body.vcn, 'Lido agora no emissor'); else put(out, errorBox(r, 'Consulta'));
+  });
+  const limit = h('input', { value: (c.limit && c.limit.amount) || '', size: 10, inputmode: 'decimal', name: 'limit', autocomplete: 'off' });
+  const until = h('input', { type: 'date', value: c.valid_until || '', name: 'valid_until' });
+  const update = (e) => busy(e.target, async () => {
+    // o emissor pede o cartão inteiro: o que não muda é repetido como está
+    const card = { reference: c.reference, holder_name: c.holder_name, limit: { amount: limit.value, currency: c.limit.currency }, active_from: c.active_from, valid_until: until.value, use: u };
+    const r = await api('PATCH', '/v1/vcns/' + c.id, { body: card, label: 'atualizar cartão' });
+    if (ok(r)) redraw(r.body.vcn, 'Cartão atualizado'); else put(out, errorBox(r, 'Atualização'));
+  });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  const cancelByKey = (e) => {
+    if (!confirm('Cancelar o cartão ' + (c.last4 ? '•••• ' + c.last4 : c.id) + ' no emissor? Não dá para desfazer.')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', '/v1/vcns/' + c.id + '/cancel', { body: {}, headers: { 'Idempotency-Key': key.value }, label: 'cancelar cartão' });
+      if (ok(r)) redraw(r.body.vcn, 'Cartão cancelado'); else put(out, errorBox(r, 'Cancelamento'));
+    });
+  };
+  const cancelByAccount = (e) => {
+    if (!confirm('Cancelar o cartão ' + (c.last4 ? '•••• ' + c.last4 : c.id) + ' no emissor, pela API de gestão? Não dá para desfazer.')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', '/v1/management/vcns/' + c.id + '/cancel', { body: {}, label: 'cancelar cartão (gestão)' });
+      if (ok(r)) redraw(r.body, 'Cartão cancelado'); else put(out, errorBox(r, 'Cancelamento'));
+    });
+  };
+  frame(body,
+    title('credit-card', 'Cartão virtual ', badge(c.status), ' ', h('span', { class: 'mono', translate: 'no' }, c.last4 ? '•••• ' + c.last4 : '')),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', c.integration), h('span', {}, ic('user'), ' ', c.holder_name || '—'), h('span', {}, ic('wallet'), ' ', money(c.limit))),
+    usable && (c.booking_status === 'failed' || c.booking_status === 'cancelled') ? h('div', { class: 'alert amber' }, 'Este cartão continua utilizável no emissor e a reserva dele não existe mais. Se o hotel não tem multa a cobrar nele, cancele.') : null,
+    h('dl', { class: 'kv' },
+      h('dt', {}, 'id'), h('dd', { class: 'mono' }, c.id),
+      h('dt', {}, 'Emissor'), h('dd', {}, c.integration + ' · ', h('span', { class: 'mono' }, c.credential)),
+      h('dt', {}, 'Id no emissor'), h('dd', { class: 'mono' }, c.supplier_id || '—'),
+      h('dt', {}, 'Portador'), h('dd', {}, c.holder_name || '—'),
+      h('dt', {}, 'Limite'), h('dd', {}, money(c.limit)),
+      h('dt', {}, 'Validade'), h('dd', {}, day(c.active_from) + ' → ' + day(c.valid_until)),
+      h('dt', {}, 'Referência'), h('dd', {}, c.reference || '—'),
+      h('dt', {}, 'Reserva'), h('dd', {}, c.booking_id ? [h('span', { class: 'mono' }, c.booking_id), c.booking_status ? [' ', badge(c.booking_status)] : null] : 'avulso (emitido em /v1/vcns)'),
+      u.check_in ? [h('dt', {}, 'Uso'), h('dd', {}, (u.hotel_name ? u.hotel_name + ' · ' : '') + day(u.check_in) + ' → ' + day(u.check_out), u.locator ? [' · localizador ', h('span', { class: 'mono' }, u.locator)] : null)] : null,
+      h('dt', {}, 'Emitido'), h('dd', {}, when(c.created_at)),
+      c.cancelled_at ? [h('dt', {}, 'Cancelado'), h('dd', {}, when(c.cancelled_at))] : null),
+    h('h2', { class: 'stitle' }, ic('bolt'), 'Ações'),
+    h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, 'As ações em /v1/vcns pedem permissão da chave de produto no produto vcn; a de gestão usa o escopo bookings:write.'),
+      usable ? h('div', { class: 'row' }, h('button', { onclick: refresh }, ic('refresh'), 'Consultar no emissor')) : null,
+      usable ? h('div', { class: 'row' }, field('Limite (' + ((c.limit && c.limit.currency) || '') + ')', limit), field('Válido até', until), h('button', { onclick: update }, ic('pencil'), 'Atualizar (PATCH /v1/vcns)')) : null,
+      usable ? h('div', { class: 'row' }, field('Idempotency-Key', key), h('button', { class: 'danger', onclick: cancelByKey }, ic('times-circle'), 'Cancelar pela chave de produto'), h('button', { class: 'danger', onclick: cancelByAccount }, ic('times-circle'), 'Cancelar pela API de gestão')) : null),
+    out, jsonBlock(c));
+  titleModal(body);
+}
+
+/** Emite um cartão avulso em /v1/vcns. O número aparece uma única vez, na resposta. */
+async function cardIssueForm(reload) {
+  const issuers = (await loadV1Integrations()).filter((i) => (i.credentials || []).some((c) => (c.allowed || []).some((a) => a.product === 'vcn' && a.operations.includes('issue'))));
+  const today = new Date();
+  const plus = (days) => { const d = new Date(today); d.setDate(d.getDate() + days); return iso(d); };
+  const integration = h('select', { name: 'integration', required: true }, issuers.length ? issuers.map((i) => opt(i.integration, i.integration)) : opt('', 'a chave não emite cartão em nenhum parceiro'));
+  const holder = h('input', { value: 'MARIA SOUZA', required: true, maxlength: 60, name: 'holder_name', autocomplete: 'off' });
+  const amount = h('input', { value: '1000.00', required: true, size: 10, inputmode: 'decimal', name: 'limit', autocomplete: 'off' });
+  const currency = h('input', { value: 'BRL', required: true, size: 4, maxlength: 3, name: 'currency', autocomplete: 'off', spellcheck: 'false' });
+  const from = h('input', { type: 'date', value: plus(0), required: true, name: 'active_from' });
+  const until = h('input', { type: 'date', value: plus(90), required: true, name: 'valid_until' });
+  const checkIn = h('input', { type: 'date', value: plus(30), required: true, name: 'check_in' });
+  const checkOut = h('input', { type: 'date', value: plus(32), required: true, name: 'check_out' });
+  const hotel = h('input', { value: 'Hotel Exemplo', name: 'hotel_name', autocomplete: 'off' });
+  const city = h('input', { value: 'São Paulo', name: 'city', autocomplete: 'off', size: 14 });
+  const state = h('input', { value: 'SP', name: 'state', autocomplete: 'off', size: 3 });
+  const country = h('input', { value: 'BR', name: 'country', autocomplete: 'off', size: 3, maxlength: 2 });
+  const reference = h('input', { value: 'SDK-VCN-' + Date.now().toString(36).toUpperCase(), maxlength: 64, name: 'reference', spellcheck: 'false', autocomplete: 'off' });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  let scenario = 'ok';
+  const scenarioBox = h('span');
+  const drawScenario = () => put(scenarioBox, integration.value === 'mock' ? field('Cenário', scenarioSelect('vcnIssue', scenario, (v) => { scenario = v; })) : null);
+  integration.addEventListener('change', drawScenario);
+  const out = h('div');
+  const submit = async (e) => {
+    e.preventDefault();
+    const [first, ...rest] = holder.value.trim().split(/\s+/);
+    const body = {
+      integration: integration.value, reference: reference.value || undefined, holder_name: holder.value.trim(),
+      limit: { amount: amount.value, currency: currency.value.toUpperCase() }, active_from: from.value, valid_until: until.value,
+      use: { type: 'hotel', hotel_name: hotel.value || undefined, city: city.value || undefined, state: state.value || undefined, country: country.value.toUpperCase() || undefined,
+        check_in: checkIn.value, check_out: checkOut.value, total: { amount: amount.value, currency: currency.value.toUpperCase() }, guest: { first_name: first, last_name: rest.join(' ') || first } },
+    };
+    await busy(e.submitter, async () => {
+      const r = await api('POST', '/v1/vcns', { body, headers: { 'Idempotency-Key': key.value, ...(integration.value === 'mock' ? mockHeader(scenario) : {}) }, label: 'emitir cartão' });
+      if (!ok(r)) { put(out, errorBox(r, 'Emissão'), h('p', { class: 'small' }, 'Nova tentativa depois de uma falha pede outra Idempotency-Key.')); return; }
+      const shown = r.body.card;
+      put(out, h('div', { class: 'alert ' + (shown ? 'green' : 'blue') },
+        shown ? [h('strong', {}, 'Cartão emitido. '), 'O número e o código abaixo aparecem só agora: o Connect não os guarda.',
+          h('dl', { class: 'kv' }, h('dt', {}, 'Número'), h('dd', { class: 'mono', translate: 'no' }, shown.number), h('dt', {}, 'CVV'), h('dd', { class: 'mono', translate: 'no' }, shown.cvv),
+            h('dt', {}, 'Validade'), h('dd', { class: 'mono' }, String(shown.expiry_month).padStart(2, '0') + '/' + shown.expiry_year))]
+          : 'Repetição com a mesma Idempotency-Key: este é o cartão que já existia, sem o número.'),
+      h('dl', { class: 'kv' }, h('dt', {}, 'id'), h('dd', { class: 'mono' }, r.body.vcn.id), h('dt', {}, 'Estado'), h('dd', {}, badge(r.body.vcn.status)), h('dt', {}, 'Id no emissor'), h('dd', { class: 'mono' }, r.body.vcn.supplier_id || '—')));
+      reload();
+    });
+  };
+  openModal(title('plus', 'Emitir cartão virtual'),
+    h('div', { class: 'sub' }, 'POST /v1/vcns, com a chave de produto. Em parceiro real o cartão é de verdade.'),
+    h('form', { class: 'stack', onsubmit: submit },
+      h('div', { class: 'row' }, field('Emissor', integration), scenarioBox, field('Portador', holder), field('Limite', amount), field('Moeda', currency)),
+      h('div', { class: 'row' }, field('Vale a partir de', from), field('Válido até', until), field('Referência', reference)),
+      h('h3', {}, ic('building'), ' Uso: a estadia que o cartão paga'),
+      h('div', { class: 'row' }, field('Hotel', hotel), field('Cidade', city), field('UF', state), field('País', country), field('Check-in', checkIn), field('Check-out', checkOut)),
+      h('div', { class: 'row' }, field('Idempotency-Key', key), h('button', { type: 'button', class: 'sm', onclick: () => { key.value = uuid(); } }, 'Nova chave')),
+      out, h('div', { class: 'row' }, h('button', { class: 'primary', disabled: !issuers.length }, ic('check'), 'Emitir'))));
+  drawScenario();
 }
 
 function supplierBookingModal(r) {

@@ -25,7 +25,13 @@ Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
   comodidades), cotação (mudanças, avisos do parceiro, política e taxas) e reserva com `Idempotency-Key`.
 - **Reservas**: lista (API de gestão), consulta no parceiro, **alteração** (cotar a alteração e alterar: datas,
   ocupação e nomes dos hóspedes, onde o parceiro altera) e cancelamento com multa máxima; e a leitura de
-  uma reserva direto no parceiro, pelo id dele, para a que não passou pelo Connect.
+  uma reserva direto no parceiro, pelo id dele, para a que não passou pelo Connect. Em tarifa que só aceita
+  cartão, o formulário de reserva tem os campos do cartão (`payment.card`); a reserva mostra como foi paga
+  (cartão do pedido, cartão fixo ou VCN, com a credencial do emissor usada) e a lista tem coluna e filtro
+  de pagamento.
+- **Cartões virtuais**: lista dos cartões da conta (API de gestão), com os que sobraram de reserva que não
+  existe mais; emitir um cartão avulso (o número aparece uma única vez), consultar no emissor, atualizar
+  limite e validade, cancelar pela chave de produto ou pela API de gestão.
 - **Credenciais**: parceiros e credenciais da conta; criar pelo formulário que o próprio parceiro descreve
   (`credential_schema`), editar, testar a conexão, pausar e excluir.
 - **Chaves**: chaves de produto com permissões por produto, parceiro, credencial e operação; chave de
@@ -90,6 +96,23 @@ $api->modify($id, $change['modification']['modify_token'], [['guests' => [
 
 // cancelar também leva Idempotency-Key
 $api->cancel($id, Client::uuid());
+
+// tarifa que só aceita cartão (rate.payment.methods = ['credit_card']): o cartão vai em payment.card. Sem
+// ele, vale o que a credencial do parceiro de hotel faz (emitir um cartão virtual ou usar o cartão fixo);
+// sem nenhum dos dois, 422 CARD_REQUIRED. A resposta diz como foi paga em booking.payment, nunca o número
+$api->book(['offer_token' => $token, 'rooms' => $rooms, 'payment' => ['card' => [
+    'holder_name' => 'MARIA SOUZA', 'number' => '5555555555554444', 'expiry_month' => 2, 'expiry_year' => 2030, 'cvv' => '123',
+]]], Client::uuid());
+
+// cartão virtual avulso (produto vcn): o número e o CVV vêm em `card` só na resposta da emissão
+$issued = $api->issueVcn([
+    'integration' => 'bee2pay', 'holder_name' => 'MARIA SOUZA', 'limit' => ['amount' => '1692.00', 'currency' => 'BRL'],
+    'active_from' => '2026-11-13', 'valid_until' => '2027-02-11',
+    'use' => ['type' => 'hotel', 'check_in' => '2027-01-10', 'check_out' => '2027-01-12', 'total' => ['amount' => '1692.00', 'currency' => 'BRL']],
+], Client::uuid());
+$vcnId = $issued['vcn']['id'];
+$api->vcn($vcnId, refresh: true);      // lido no emissor
+$api->cancelVcn($vcnId, Client::uuid());
 ```
 
 O Connect não espalha a busca por parceiros nem junta respostas: cada chamada é uma integração e uma lista
