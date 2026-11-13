@@ -27,7 +27,7 @@ const CARD_SOURCES = { request: 'cartão do pedido', vcn: 'VCN', fixed: 'cartão
 // os valores de um select da credencial são códigos do catálogo; os conhecidos são ditos em palavras
 const OPTION_LABELS = {
   card_accept: { no: 'Não aceitar: a reserva é recusada', yes: 'Aceitar' },
-  card_mode: { request: 'Enviado no pedido de reserva', vcn: 'Cartão virtual emitido por uma integração', fixed_card: 'Cartão fixo cadastrado aqui' },
+  card_mode: { request: 'Enviado no pedido de reserva', vcn: 'Cartão virtual (VCN)', fixed_card: 'Cartão fixo cadastrado aqui' },
   vcn_holder: { guest: 'O titular da reserva', fixed: 'Sempre o mesmo nome' },
 };
 const BOARDS = { room_only: 'Só hospedagem', breakfast: 'Café da manhã', half_board: 'Meia pensão', full_board: 'Pensão completa', all_inclusive: 'All inclusive', other: 'Outro' };
