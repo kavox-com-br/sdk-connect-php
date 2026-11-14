@@ -16,6 +16,10 @@ const SCENARIOS = {
   insuranceSearch: ['ok', 'credential', 'unavailable', 'timeout', 'slow'],
   insuranceQuote: ['ok', 'price_changed', 'credential', 'unavailable', 'timeout', 'slow'],
   insuranceBook: ['ok', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+  carSearch: ['ok', 'empty', 'credential', 'unavailable', 'timeout', 'slow'],
+  carQuote: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'credential', 'unavailable', 'timeout', 'slow'],
+  carBook: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+  carCancel: ['ok', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
 };
 const PAYMENT_METHODS = { invoice: 'faturado', voucher: 'voucher', prepay: 'pré-pagamento', deposit: 'depósito', credit_card: 'cartão de crédito' };
 const BOOKING_WARNINGS = {
@@ -240,7 +244,7 @@ const stars = (n) => (n ? h('span', { class: 'stars', title: n + ' estrelas' }, 
 
 // ---------- rotas ----------
 
-const VIEWS = { hotel: viewHotel, reservas: viewBookings, seguro: viewInsurance, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
+const VIEWS = { hotel: viewHotel, reservas: viewBookings, seguro: viewInsurance, carros: viewCars, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
 function tab() { return (location.hash.replace(/^#\//, '') || 'hotel').split('/')[0]; }
 async function render() {
   const name = VIEWS[tab()] ? tab() : 'hotel';
@@ -1289,7 +1293,7 @@ async function viewBookings() {
   const st = (S.bookings ||= { environment: (S.me && S.me.environment) || 'sandbox', status: '', reference: '', payment: '', items: [], cursor: null, loaded: false });
   const tableBox = h('div');
   const load = async (more) => {
-    const r = await api('GET', '/v1/management/bookings', { query: { environment: st.environment, status: st.status, reference: st.reference, card_source: CARD_SOURCES[st.payment] ? st.payment : undefined, payment_method: PAYMENT_METHODS[st.payment] ? st.payment : undefined, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas' });
+    const r = await api('GET', '/v1/management/bookings', { query: { environment: st.environment, product: 'hotel', status: st.status, reference: st.reference, card_source: CARD_SOURCES[st.payment] ? st.payment : undefined, payment_method: PAYMENT_METHODS[st.payment] ? st.payment : undefined, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas' });
     if (!ok(r)) { put(tableBox, errorBox(r)); return; }
     st.items = more ? st.items.concat(r.body.data) : r.body.data;
     st.cursor = r.body.next_cursor || null;
@@ -1599,6 +1603,269 @@ function insuranceModal(b, reload) {
     h('div', { class: 'stack' },
       h('p', { class: 'small muted' }, 'Cada ação é uma permissão própria da chave no produto insurance: retrieve, cancel, cancel_passenger, shift_start e resend_voucher. O Connect não calcula reembolso: vale a política congelada na reserva.'),
       h('div', { class: 'row' }, h('button', { onclick: refresh }, ic('refresh'), 'Consultar no parceiro'), b.status === 'confirmed' ? h('button', { class: 'danger', onclick: cancelAll }, ic('times-circle'), 'Cancelar a reserva inteira') : null)),
+    out, jsonBlock(b));
+  titleModal(body);
+}
+
+// ---------- carros (/v1/cars) ----------
+
+const CAR_AVAILABILITY = { available: ['disponível', 'green'], on_request: ['sob consulta', 'amber'], unavailable: ['indisponível', 'red'] };
+const carClock = (at) => { const [d, t] = String(at || '').split('T'); return d ? day(d) + ' ' + (t || '').slice(0, 5) : '—'; };
+const carPlace = (p) => (p && p.location ? (p.location.name || p.location.code) + (p.location.name ? ' (' + p.location.code + ')' : '') : '—');
+const carName = (v) => (v ? v.group_name || (v.models || [])[0] || v.group : '');
+/** O preço de uma proteção ou item, nas partes que a locadora informou. Nada é multiplicado aqui. */
+const carPrice = (x) => [x.daily ? money(x.daily) + ' por dia' : '', x.per_rental ? money(x.per_rental) + ' por locação' : '', x.percent ? x.percent + '% da locação' : '', x.fee ? money(x.fee) + ' de taxa' : '', x.total ? money(x.total) + ' no período' : ''].filter(Boolean).join(' · ');
+const carMarks = (c) => [typeof c.in_rate === 'boolean' ? (c.in_rate ? 'na tarifa' : 'fora da tarifa') : '', typeof c.in_total === 'boolean' ? (c.in_total ? 'no total' : 'fora do total') : ''].filter(Boolean).join(' · ');
+const carAvailability = (o) => { const [label, color] = CAR_AVAILABILITY[o.availability] || [o.availability, '']; return badge(label, color); };
+
+/** As linhas do preço de uma oferta, como a locadora as escreveu. */
+function carCharges(o) {
+  return (o.charges || []).length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Linha', 'Tipo', 'Marcas da locadora', 'Valor'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, o.charges.map((c) => h('tr', {},
+      h('td', {}, c.name || c.kind, c.unit_amount && c.quantity ? h('div', { class: 'small muted' }, c.quantity + ' × ' + money(c.unit_amount)) : null),
+      h('td', { class: 'small' }, c.kind, c.percent ? ' · ' + c.percent + '%' : ''), h('td', { class: 'small muted' }, carMarks(c) || 'não informa'), h('td', { class: 'nowrap' }, money(c.amount))))))) : h('p', { class: 'small muted' }, 'A locadora não detalhou o preço em linhas.');
+}
+
+/** Carros: lojas, busca, cotação com proteções e itens, reserva, e a lista do que foi reservado. */
+async function viewCars() {
+  const st = (S.cars ||= { environment: (S.me && S.me.environment) || 'sandbox', items: [], cursor: null, loaded: false, offers: null, stores: null });
+  const companies = (await loadV1Integrations()).filter((i) => (i.credentials || []).some((c) => (c.allowed || []).some((a) => a.product === 'car' && a.operations.includes('search'))));
+  const plus = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return iso(d); };
+  const integration = h('select', { name: 'integration', required: true }, companies.length ? companies.map((i) => opt(i.integration, i.integration)) : opt('', 'a chave não busca carro em nenhuma locadora'));
+  const pickup = h('input', { value: 'CGH', required: true, name: 'pickup', size: 10, autocomplete: 'off', spellcheck: 'false', title: 'Aeroporto (3 letras) ou o código de uma loja da locadora' });
+  const dropoff = h('input', { value: '', placeholder: 'mesma loja', name: 'dropoff', size: 10, autocomplete: 'off', spellcheck: 'false', title: 'Vazio = devolve na loja da retirada. Aeroporto ou código de loja' });
+  const pickupAt = h('input', { type: 'datetime-local', value: plus(30) + 'T10:00', required: true, name: 'pickup_at' });
+  const dropoffAt = h('input', { type: 'datetime-local', value: plus(33) + 'T10:00', required: true, name: 'dropoff_at' });
+  const corporate = h('input', { value: '', name: 'corporate_code', size: 10, autocomplete: 'off', spellcheck: 'false', title: 'Código corporativo na locadora. Vazio = o da credencial' });
+  const payment = h('select', { name: 'payment_kind', title: 'O que pedir à locadora para faturar, onde ela aceita' }, opt('', 'o da credencial'), ['invoice_daily', 'invoice_partial', 'invoice_total', 'counter'].map((k) => opt(k, k)));
+  let scenario = 'ok';
+  const offersBox = h('div');
+  const storesBox = h('div');
+  const listBox = h('div');
+  // três letras são um aeroporto; o resto é o código de uma loja
+  const placeOf = (value, at) => { const v = value.trim().toUpperCase(); const out = { at: at.slice(0, 16) }; if (/^[A-Z]{3}$/.test(v)) out.iata = v; else if (v) out.code = v; return out; };
+
+  const drawOffers = () => {
+    const r = st.offers;
+    if (!r) { put(offersBox); return; }
+    put(offersBox, r.length ? h('div', { class: 'stack' }, r.map((o) => h('div', { class: 'card' },
+      h('div', { class: 'head' },
+        h('div', {}, h('strong', {}, carName(o.vehicle)), ' ', h('span', { class: 'mono small' }, [o.vehicle.group, o.vehicle.acriss].filter(Boolean).join(' · ')), ' ', carAvailability(o), o.vehicle.armored ? [' ', badge('blindado', 'amber')] : null,
+          h('div', { class: 'small muted' }, o.rental_company, ' · ', o.vehicle.category, ' · ', o.vehicle.transmission, (o.vehicle.models || []).length ? ' · ' + o.vehicle.models.join(', ') : ''),
+          h('div', { class: 'small muted' }, carPlace(o.pickup), ' ', carClock(o.pickup.at), ' → ', carPlace(o.dropoff), ' ', carClock(o.dropoff.at), o.days ? ' · ' + o.days + ' diária(s)' : '', o.mileage && o.mileage.unlimited ? ' · km livre' : o.mileage ? ' · ' + o.mileage.included + ' ' + o.mileage.unit + '/' + o.mileage.period : '')),
+        h('div', { class: 'right' }, h('strong', {}, money(o.total)),
+          o.rate_total ? h('div', { class: 'small muted' }, 'tarifa ', money(o.rate_total)) : null,
+          o.daily ? h('div', { class: 'small muted' }, 'diária ', money(o.daily)) : null,
+          o.deposit ? h('div', { class: 'small muted' }, 'pré-autorização ', money(o.deposit)) : null)),
+      (o.coverages || []).length ? h('div', { class: 'small' }, 'Proteções: ', o.coverages.map((c) => c.name + (c.included ? ' (na tarifa)' : '') + (c.required ? ' (exigida)' : '')).join(' · ')) : null,
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => carQuoteForm(o, reloadList) }, ic('calculator'), 'Cotar e reservar')),
+      jsonBlock(o)))) : h('div', { class: 'card empty' }, emptyMark(), 'A locadora não tem carro nessa loja e nesse período.'));
+  };
+  const search = async (e) => {
+    e.preventDefault();
+    const body = { integration: integration.value, pickup: placeOf(pickup.value, pickupAt.value), dropoff: placeOf(dropoff.value, dropoffAt.value) };
+    if (corporate.value.trim()) body.corporate_code = corporate.value.trim();
+    if (payment.value) body.payment_kind = payment.value;
+    const r = await api('POST', '/v1/cars/search', { body, headers: scenarioHeader(scenario), label: 'buscar carros' });
+    if (!ok(r)) { st.offers = null; put(offersBox, errorBox(r, 'Busca')); return; }
+    st.offers = r.body.results;
+    drawOffers();
+  };
+  const stores = (e) => busy(e.target, async () => {
+    const r = await api('GET', '/v1/cars/locations', { query: { integration: integration.value }, label: 'lojas' });
+    if (!ok(r)) { put(storesBox, errorBox(r, 'Lojas')); return; }
+    put(storesBox, h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('map-marker', 'Lojas de ' + r.body.integration + ' (' + r.body.locations.length + ')'), h('p', { class: 'muted' }, 'Como a locadora as lista agora. O Connect não guarda a lista. Clique numa loja para usá-la na retirada.'))),
+      h('div', { class: 'tablewrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Código', 'Loja', 'Tipo', 'Aeroporto', 'Cidade'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, r.body.locations.slice(0, 300).map((l) => h('tr', { class: 'click', tabindex: 0, onclick: () => { pickup.value = l.code; pickup.focus(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { pickup.value = l.code; pickup.focus(); } } },
+          h('td', { class: 'mono' }, l.code), h('td', {}, l.name || '—', l.flight_required ? h('div', { class: 'small muted' }, 'só reserva com o voo de chegada') : null), h('td', {}, l.kind || '—'), h('td', {}, l.iata || '—'), h('td', {}, [l.city, l.state].filter(Boolean).join(' / ') || '—'))))))));
+  });
+
+  const load = async (more) => {
+    const r = await api('GET', '/v1/management/car-bookings', { query: { environment: st.environment, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas de carro' });
+    if (!ok(r)) { put(listBox, errorBox(r)); return; }
+    st.items = more ? st.items.concat(r.body.data) : r.body.data;
+    st.cursor = r.body.next_cursor || null;
+    st.loaded = true;
+    drawList();
+  };
+  const reloadList = () => load();
+  const openOne = (b) => carModal(b, reloadList);
+  const drawList = () => put(listBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Retirada', 'Devolução', 'Carro', 'Locadora', 'Localizador', 'Total'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, st.items.map((b) => h('tr', { class: 'click', tabindex: 0, onclick: () => openOne(b), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openOne(b); } } },
+      h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status)),
+      h('td', { class: 'nowrap' }, carClock(b.offer.pickup.at), h('div', { class: 'small muted' }, carPlace(b.offer.pickup))),
+      h('td', { class: 'nowrap' }, carClock(b.offer.dropoff.at), h('div', { class: 'small muted' }, carPlace(b.offer.dropoff))),
+      h('td', {}, carName(b.offer.vehicle), h('div', { class: 'small muted mono' }, b.offer.vehicle.acriss || b.offer.vehicle.group)),
+      h('td', {}, b.integration), h('td', {}, h('span', { class: 'mono' }, b.locator || '—'), h('div', { class: 'small muted' }, b.reference || '')),
+      h('td', { class: 'nowrap' }, money(b.total || b.offer.total)))))),
+  st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhuma reserva de carro neste ambiente.'));
+
+  const byId = h('input', { placeholder: '01a1cd35-…', class: 'mono', size: 38, name: 'booking_id', spellcheck: 'false', autocomplete: 'off', required: true });
+  const openById = async (e) => {
+    e.preventDefault();
+    const r = await api('GET', '/v1/cars/bookings/' + byId.value.trim(), { label: 'consultar carro' });
+    if (ok(r)) openOne(r.body.booking); else openModal(errorBox(r, 'Reserva de carro'));
+  };
+
+  if (!st.loaded) load(); else drawList();
+  drawOffers();
+  return h('div', {},
+    h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('car', 'Carros'),
+      h('p', { class: 'muted' }, 'Busca numa locadora as ofertas de uma locação. O Connect não filtra, não soma e não converte: toda oferta que a locadora responde aparece, com o total dela e marcada com o que ela disse (sob consulta, bloqueada, proteção exigida). A única conferência é se o total mudou antes de reservar.'))),
+    h('form', { class: 'row', onsubmit: (e) => busy(e.submitter, () => search(e)) },
+      field('Locadora', integration), field('Retirada (aeroporto ou loja)', pickup), field('Quando', pickupAt), field('Devolução', dropoff), field('Quando', dropoffAt),
+      field('Código corporativo', corporate), field('Faturamento', payment),
+      field('Cenário', scenarioSelect('carSearch', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary' }, ic('search'), 'Buscar carros'),
+      h('button', { type: 'button', onclick: stores }, ic('map-marker'), 'Lojas'))),
+    storesBox, offersBox,
+    h('div', { class: 'card' }, h('div', { class: 'head' },
+      h('div', {}, title('list', 'Reservas de carro'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/car-bookings). Uma reserva não leva nome, documento nem contato de ninguém: o Connect não guarda.')),
+      h('div', { class: 'row' },
+        field('Ambiente', h('select', { onchange: (e) => { st.environment = e.target.value; load(); } }, opt('sandbox', 'sandbox', st.environment === 'sandbox'), opt('production', 'production', st.environment === 'production'))),
+        h('form', { class: 'row', onsubmit: openById }, field('Abrir por id (/v1/cars/bookings)', byId), h('button', {}, 'Abrir')))),
+    listBox));
+}
+
+/** Escolher proteções e itens de uma oferta, cotar e reservar. */
+function carQuoteForm(rate, reload) {
+  const body = openModal();
+  const out = h('div');
+  const picks = [];
+  const pick = (x, isItem) => {
+    const box = h('input', { type: 'checkbox', name: 'selection', value: x.code });
+    const qty = isItem && (x.max_quantity || 0) !== 1 ? h('input', { type: 'number', min: 1, max: x.max_quantity || 99, value: 1, name: 'quantity', style: 'width:4rem', 'aria-label': 'Quantidade de ' + x.name }) : null;
+    picks.push({ code: x.code, box, qty });
+    return h('label', { class: 'row' }, box, h('span', {}, x.name, ' ', h('span', { class: 'mono small' }, x.code), x.group ? h('span', { class: 'small muted' }, ' · grupo ' + x.group) : null, h('div', { class: 'small muted' }, carPrice(x) || 'sem preço informado', x.excess ? ' · coparticipação ' + money(x.excess) : '')), qty);
+  };
+  const fixed = (rate.coverages || []).filter((c) => !c.selectable);
+  const coverages = (rate.coverages || []).filter((c) => c.selectable);
+  const items = (rate.equipment || []).filter((e) => e.selectable);
+  let scenario = 'ok';
+  const quote = (e) => busy(e.target, async () => {
+    const selections = picks.filter((p) => p.box.checked).map((p) => ({ code: p.code, quantity: p.qty ? parseInt(p.qty.value, 10) || 1 : 1 }));
+    const r = await api('POST', '/v1/cars/quote', { body: { rate_token: rate.rate_token, selections }, headers: scenarioHeader(scenario), label: 'cotar carro' });
+    if (!ok(r)) { put(out, errorBox(r, 'Cotação')); return; }
+    put(out, carBookForm(r.body.offer, r.body.changed, reload));
+  });
+  frame(body,
+    title('calculator', 'Cotar ', carName(rate.vehicle)),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', rate.rental_company), h('span', {}, ic('calendar'), ' ', carClock(rate.pickup.at) + ' → ' + carClock(rate.dropoff.at)), h('span', {}, ic('wallet'), ' ', money(rate.total))),
+    h('p', { class: 'small muted' }, 'Os códigos são os da própria oferta. Quem recusa um código ou uma combinação é a locadora: group, includes e excludes são as regras dela, como dado.'),
+    fixed.length ? h('div', { class: 'small' }, 'Já na oferta: ', fixed.map((c) => c.name + (c.included ? ' (na tarifa)' : '') + (c.required ? ' (exigida)' : '') + (c.excess ? ' · coparticipação ' + money(c.excess) : '')).join(' · ')) : null,
+    h('h2', { class: 'stitle' }, ic('shield'), 'Proteções'),
+    coverages.length ? h('div', { class: 'stack' }, coverages.map((c) => pick(c, false))) : h('div', { class: 'empty' }, 'A locadora não oferece proteção para escolher nesta oferta.'),
+    h('h2', { class: 'stitle' }, ic('box'), 'Itens'),
+    items.length ? h('div', { class: 'stack' }, items.map((x) => pick(x, true))) : h('div', { class: 'empty' }, 'A locadora não oferece item para escolher nesta oferta.'),
+    h('div', { class: 'row' }, field('Cenário', scenarioSelect('carQuote', 'ok', (v) => { scenario = v; })), h('button', { class: 'primary', onclick: quote }, ic('calculator'), 'Cotar')),
+    out);
+  titleModal(body);
+}
+
+/** A oferta cotada e o formulário da reserva. */
+function carBookForm(offer, changed, reload) {
+  const out = h('div');
+  const first = h('input', { value: 'Marina', required: true, maxlength: 60, name: 'first_name', autocomplete: 'off', size: 12 });
+  const last = h('input', { value: 'Souza Lima', required: true, maxlength: 60, name: 'last_name', autocomplete: 'off', size: 14 });
+  const born = h('input', { type: 'date', value: '1988-04-12', name: 'birth_date' });
+  const doc = h('input', { value: '52998224725', name: 'document', autocomplete: 'off', size: 13, inputmode: 'numeric', title: 'CPF de exemplo, válido só no formato' });
+  const email = h('input', { type: 'email', value: 'pessoa@example.com', name: 'email', autocomplete: 'off', size: 22 });
+  const phone = h('input', { value: '5511987654321', name: 'phone', autocomplete: 'off', size: 14, inputmode: 'numeric' });
+  const airline = h('input', { value: '', placeholder: 'LA', name: 'airline', size: 4, maxlength: 3, autocomplete: 'off', spellcheck: 'false' });
+  const flight = h('input', { value: '', placeholder: '3456', name: 'flight_number', size: 6, maxlength: 8, autocomplete: 'off', spellcheck: 'false' });
+  const reference = h('input', { value: 'SDK-CAR-' + Date.now().toString(36).toUpperCase(), maxlength: 64, name: 'reference', spellcheck: 'false', autocomplete: 'off' });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  const slack = h('input', { value: '', placeholder: '0.00', size: 6, inputmode: 'decimal', name: 'max_price_increase_percent', autocomplete: 'off', title: 'Aumento do total aceito sem nova pergunta, em %' });
+  let scenario = 'ok';
+  let token = offer.offer_token;
+  const book = (e) => busy(e.target, async () => {
+    const booking = { offer_token: token, reference: reference.value, driver: { first_name: first.value, last_name: last.value, birth_date: born.value || undefined, document_kind: doc.value ? 'cpf' : undefined, document: doc.value || undefined, email: email.value || undefined, phone: phone.value || undefined } };
+    if (flight.value.trim()) booking.flight = { airline: airline.value.trim(), number: flight.value.trim(), arrival_at: offer.pickup.at };
+    if (slack.value.trim()) booking.accept_changes = { max_price_increase_percent: slack.value.trim() };
+    const r = await api('POST', '/v1/cars/bookings', { body: booking, headers: { 'Idempotency-Key': key.value, ...scenarioHeader(scenario) }, label: 'reservar carro' });
+    if (ok(r)) { closeModal(); toast(r.status === 202 ? 'A locadora segura sob consulta, ou não respondeu: reserva pendente' : r.status === 200 ? 'Reserva que já existia' : 'Carro reservado'); carModal(r.body.booking, reload); reload(); return; }
+    const changedOffer = r.body && r.body.error && r.body.error.offer;
+    if (changedOffer) {
+      // a única conferência do Connect: o total mudou. Quem decide reservar pelo total novo é quem chama
+      token = changedOffer.offer_token;
+      const c = (changedOffer.changes || [])[0] || {};
+      put(out, h('div', { class: 'alert amber' }, 'A locadora agora cobra ', h('strong', {}, money(c.current)), ' (era ', money(c.previous), '). Nada foi reservado. Reservar de novo usa a oferta em vigor.'), errorBox(r, 'Reserva'));
+      key.value = uuid();
+      return;
+    }
+    put(out, errorBox(r, 'Reserva'));
+  });
+  const chosen = (offer.coverages || []).filter((c) => c.selected).concat((offer.equipment || []).filter((x) => x.quantity > 0));
+  return h('div', { class: 'stack' },
+    h('div', { class: 'alert ' + (changed ? 'amber' : '') }, 'Oferta: ', h('strong', {}, money(offer.total)), ' ', carAvailability(offer), changed ? ' · o total é outro que o da busca' : '', ' · vale até ', when(offer.expires_at)),
+    h('div', { class: 'alert ' + (offer.selections_in_total ? '' : 'amber') }, offer.selections_in_total ? 'A locadora contou as escolhas no total.' : 'A locadora não precifica escolha: o total é só da locação e cada linha escolhida traz o seu preço. O Connect não soma.'),
+    chosen.length ? h('div', { class: 'small' }, 'Escolhido: ', chosen.map((x) => (x.quantity > 1 ? x.quantity + '× ' : '') + x.name + (carPrice(x) ? ' (' + carPrice(x) + ')' : '')).join(' · ')) : null,
+    carCharges(offer),
+    (offer.notices || []).map((n) => h('div', { class: 'small' }, n.title ? h('strong', {}, n.title + ': ') : null, (n.lines || []).join(' '))),
+    h('h2', { class: 'stitle' }, ic('user'), 'Condutor'),
+    h('div', { class: 'row' }, field('Nome', first), field('Sobrenome', last), field('Nascimento', born), field('CPF', doc), field('E-mail', email), field('Telefone', phone)),
+    h('div', { class: 'row' }, field('Cia aérea', airline), field('Voo de chegada', flight), h('span', { class: 'small muted' }, offer.pickup.location.flight_required ? 'A locadora só reserva nesta loja com o voo de chegada.' : 'Opcional: só as lojas que pedem.')),
+    h('p', { class: 'small muted' }, 'O Connect só confere o formato; o que a locadora exige (documento, idade, voo) é ela que recusa. Nada do condutor é guardado.'),
+    h('div', { class: 'row' }, field('Referência', reference), field('Idempotency-Key', key), field('Aumento aceito (%)', slack), field('Cenário', scenarioSelect('carBook', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary', onclick: book }, ic('check'), 'Reservar')),
+    out);
+}
+
+/** Uma reserva de carro: a oferta como a locadora a cotou, e o que dá para fazer com ela. */
+function carModal(b, reload) {
+  const body = openModal();
+  const out = h('div');
+  const redraw = (next, note) => { closeModal(); carModal(next, reload); if (note) toast(note); reload(); };
+  const path = '/v1/cars/bookings/' + b.id;
+  let scenario = 'ok';
+  const refresh = (e) => busy(e.target, async () => {
+    const r = await api('GET', path, { query: { refresh: 'true' }, label: 'consultar na locadora' });
+    if (ok(r)) redraw(r.body.booking, r.body.booking.refreshed ? 'Lido agora na locadora' : 'A locadora não devolveu a reserva: mostrada como está guardada'); else put(out, errorBox(r, 'Consulta'));
+  });
+  const cancel = (e) => {
+    if (!confirm('Cancelar a reserva ' + (b.locator || b.id) + ' na locadora?')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', path + '/cancel', { body: {}, headers: { 'Idempotency-Key': uuid(), ...scenarioHeader(scenario) }, label: 'cancelar carro' });
+      if (ok(r)) redraw(r.body.booking, 'Reserva cancelada'); else put(out, errorBox(r, 'Cancelamento'));
+    });
+  };
+  const o = b.offer;
+  const v = o.vehicle;
+  const coverages = (o.coverages || []).filter((c) => c.included || c.required || c.selected);
+  const items = (o.equipment || []).filter((x) => x.quantity > 0 || x.included);
+  frame(body,
+    title('car', 'Carro ', badge(b.status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, b.locator) : ''),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', b.integration), h('span', {}, ic('calendar'), ' ', carClock(o.pickup.at) + ' → ' + carClock(o.dropoff.at)), h('span', {}, ic('wallet'), ' ', money(b.total || o.total))),
+    (b.warnings || []).map((w) => h('div', { class: 'alert amber' }, BOOKING_WARNINGS[w] || w)),
+    b.failure ? h('div', { class: 'alert red' }, 'Não reservada: ', b.failure.code, b.failure.supplier_message ? ' · ' + [b.failure.supplier_code, b.failure.supplier_message].filter(Boolean).join(' ') : '') : null,
+    h('dl', { class: 'kv' },
+      h('dt', {}, 'id'), h('dd', { class: 'mono' }, b.id),
+      h('dt', {}, 'Locadora'), h('dd', {}, o.rental_company + ' · ' + b.integration + ' · ', h('span', { class: 'mono' }, b.credential)),
+      h('dt', {}, 'Referência'), h('dd', {}, b.reference || '—'),
+      h('dt', {}, 'Retirada'), h('dd', {}, carClock(o.pickup.at), ' · ', carPlace(o.pickup), o.pickup.location.address ? ' · ' + o.pickup.location.address : ''),
+      h('dt', {}, 'Devolução'), h('dd', {}, carClock(o.dropoff.at), ' · ', carPlace(o.dropoff)),
+      h('dt', {}, 'Veículo'), h('dd', {}, carName(v), ' · ', h('span', { class: 'mono' }, [v.group, v.acriss].filter(Boolean).join(' · ')), ' · ', v.category, ' · ', v.transmission, (v.models || []).length ? ' · ' + v.models.join(', ') : '', v.armored ? ' · blindado' : ''),
+      h('dt', {}, 'Tarifa'), h('dd', {}, [o.rate_name, o.rate_code].filter(Boolean).join(' · ') || '—', ' ', carAvailability(o), o.days ? ' · ' + o.days + ' diária(s)' : '', o.corporate ? ' · código corporativo' : '', o.payment_kind ? ' · ' + o.payment_kind : ''),
+      h('dt', {}, 'Total da oferta'), h('dd', {}, money(o.total), o.rate_total ? [' · tarifa ', money(o.rate_total)] : null, o.daily ? [' · diária ', money(o.daily)] : null, o.selections_in_total ? ' · escolhas contadas no total' : ' · escolhas fora do total'),
+      b.total ? [h('dt', {}, 'Total respondido na reserva'), h('dd', {}, money(b.total))] : null,
+      o.deposit ? [h('dt', {}, 'Pré-autorização'), h('dd', {}, money(o.deposit))] : null,
+      o.commission_percent ? [h('dt', {}, 'Comissão informada'), h('dd', {}, o.commission_percent + '%')] : null,
+      b.confirm_until ? [h('dt', {}, 'Prazo da locadora para confirmar'), h('dd', {}, when(b.confirm_until))] : null,
+      b.supplier_status ? [h('dt', {}, 'Estado na locadora'), h('dd', { class: 'mono' }, b.supplier_status)] : null,
+      b.cancellation ? [h('dt', {}, 'Cancelada'), h('dd', {}, when(b.cancellation.cancelled_at) + ' · por ' + b.cancellation.by)] : null),
+    h('h2', { class: 'stitle' }, ic('wallet'), 'Linhas do preço'), carCharges(o),
+    h('h2', { class: 'stitle' }, ic('shield'), 'Proteções e itens'),
+    coverages.concat(items).length ? h('div', { class: 'stack' }, coverages.map((c) => h('div', { class: 'small' }, h('strong', {}, c.name), ' ', h('span', { class: 'mono' }, c.code), c.included ? ' · na tarifa' : '', c.required ? ' · exigida' : '', c.selected ? ' · escolhida' : '', c.excess ? ' · coparticipação ' + money(c.excess) : '', carPrice(c) ? ' · ' + carPrice(c) : '')),
+      items.map((x) => h('div', { class: 'small' }, h('strong', {}, (x.quantity > 1 ? x.quantity + '× ' : '') + x.name), ' ', h('span', { class: 'mono' }, x.code), x.included ? ' · na tarifa' : '', carPrice(x) ? ' · ' + carPrice(x) : ''))) : h('div', { class: 'empty' }, 'Nenhuma proteção nem item na reserva.'),
+    (o.notices || []).length ? [h('h2', { class: 'stitle' }, ic('file'), 'Termos da locadora'), o.notices.map((n) => h('div', { class: 'small' }, n.title ? h('strong', {}, n.title + ': ') : null, (n.lines || []).join(' ')))] : null,
+    h('h2', { class: 'stitle' }, ic('bolt'), 'Ações'),
+    h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, 'Consultar e cancelar são permissões da chave no produto car (retrieve, cancel). O Connect nunca cancela sozinho e não calcula valor de cancelamento: valem os termos que a locadora mandou.'),
+      h('div', { class: 'row' }, h('button', { onclick: refresh }, ic('refresh'), 'Consultar na locadora'),
+        b.status === 'confirmed' ? [field('Cenário', scenarioSelect('carCancel', 'ok', (s) => { scenario = s; })), h('button', { class: 'danger', onclick: cancel }, ic('times-circle'), 'Cancelar a reserva')] : null)),
     out, jsonBlock(b));
   titleModal(body);
 }

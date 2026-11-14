@@ -34,6 +34,11 @@ Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
   uma, consultar no parceiro, cancelar a reserva ou um voucher, mudar o início da vigência e pedir reenvio do
   voucher. O Connect não filtra plano nem escolhe valor: mostra o que o parceiro respondeu; a única
   conferência é se o preço mudou antes de emitir.
+- **Carros**: listar as lojas de uma locadora, buscar por loja ou por aeroporto, cotar com proteções e
+  itens e reservar; a lista das reservas de carro (API de gestão) e, em cada uma, consultar na locadora e
+  cancelar. O Connect não filtra oferta, não soma linha nem converte: mostra o total, as linhas e as marcas
+  que a locadora respondeu (sob consulta, bloqueada, proteção exigida, `selections_in_total`); a única
+  conferência é se o total mudou antes de reservar.
 - **Cartões virtuais**: lista dos cartões da conta (API de gestão), com os que sobraram de reserva que não
   existe mais; emitir um cartão avulso (o número aparece uma única vez), consultar no emissor, atualizar
   limite e validade, cancelar pela chave de produto ou pela API de gestão.

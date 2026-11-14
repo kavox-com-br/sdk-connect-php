@@ -376,6 +376,81 @@ final class Client
         return '/v1/insurances/bookings/' . rawurlencode($bookingId) . '/vouchers/' . rawurlencode($voucherCode);
     }
 
+    // ---------- carros (/v1/cars) ----------
+
+    /**
+     * As lojas de uma locadora, como ela as lista agora. O `code` de cada uma vai em pickup.code e
+     * dropoff.code. O Connect não guarda a lista: a resposta pode ser grande; guarde a sua cópia.
+     *
+     * @return array<string, mixed>
+     */
+    public function carLocations(string $integration, ?string $credential = null): array
+    {
+        return $this->get('/v1/cars/locations', array_filter(['integration' => $integration, 'credential' => $credential]));
+    }
+
+    /**
+     * Busca carros numa integração. $rental: pickup e dropoff, cada um com `at` (YYYY-MM-DDTHH:MM, o relógio da
+     * loja, sem fuso) e `code` (loja da locadora) ou `iata` (aeroporto); dropoff sem code nem iata devolve na
+     * loja da retirada. Opcionais: corporate_code, rate_code, payment_kind, credential.
+     *
+     * O Connect não filtra, não soma e não converte: toda oferta que a locadora respondeu vem, com o total
+     * que ela informou e marcada com o que ela disse (availability, proteção exigida, comissão). Cada oferta
+     * traz o rate_token da cotação.
+     *
+     * @param array<string, mixed> $rental
+     * @return array<string, mixed>
+     */
+    public function carSearch(string $integration, array $rental): array
+    {
+        return $this->post('/v1/cars/search', ['integration' => $integration] + $rental);
+    }
+
+    /**
+     * Cota uma oferta com as proteções e os itens escolhidos ([['code' => 'GPS', 'quantity' => 1]], os códigos
+     * de coverages e equipment da própria oferta). $token é o rate_token de uma busca ou o offer_token de uma
+     * cotação anterior, para cotar outra escolha. A resposta traz o offer_token da reserva.
+     *
+     * Quem recusa um código ou uma combinação é a locadora. selections_in_total diz se ela contou a escolha
+     * no total; quando é false, o total é o da locação e cada linha escolhida traz o seu preço: some você.
+     *
+     * @param list<array{code: string, quantity?: int}> $selections
+     * @return array<string, mixed>
+     */
+    public function carQuote(string $token, array $selections = [], bool $fromQuote = false): array
+    {
+        return $this->post('/v1/cars/quote', [$fromQuote ? 'offer_token' : 'rate_token' => $token, 'selections' => $selections]);
+    }
+
+    /**
+     * Reserva a oferta de uma cotação. $booking: offer_token, driver (first_name, last_name e, conforme a
+     * locadora, birth_date, document_kind, document, email, phone) e, opcionais, reference, flight (airline,
+     * number, arrival_at), remarks, accept_changes.max_price_increase_percent.
+     *
+     * A única conferência do Connect é se o total mudou: 409 PRICE_CHANGED traz error.offer com o offer_token
+     * da oferta em vigor. 202 = a locadora segura sob consulta, ou não respondeu com clareza: acompanhe por
+     * carBooking(). O Connect não guarda nada do condutor.
+     *
+     * @param array<string, mixed> $booking
+     * @return array<string, mixed>
+     */
+    public function carBook(array $booking, string $idempotencyKey): array
+    {
+        return $this->post('/v1/cars/bookings', $booking, $idempotencyKey);
+    }
+
+    /** A reserva de carro; com $refresh, lida antes na locadora. @return array<string, mixed> */
+    public function carBooking(string $bookingId, bool $refresh = false): array
+    {
+        return $this->get('/v1/cars/bookings/' . rawurlencode($bookingId), $refresh ? ['refresh' => 'true'] : []);
+    }
+
+    /** Cancela a reserva na locadora. O Connect nunca cancela sozinho. @return array<string, mixed> */
+    public function carCancel(string $bookingId, string $idempotencyKey): array
+    {
+        return $this->post('/v1/cars/bookings/' . rawurlencode($bookingId) . '/cancel', [], $idempotencyKey);
+    }
+
     /**
      * Cota a alteração de uma reserva confirmada: como ela ficaria com outra estadia. Não muda nada. $rooms é a
      * ocupação inteira desejada, no mesmo número e ordem dos quartos reservados; para trocar só os nomes dos
