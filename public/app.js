@@ -20,9 +20,15 @@ const SCENARIOS = {
   carQuote: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'credential', 'unavailable', 'timeout', 'slow'],
   carBook: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
   carCancel: ['ok', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
+  flightSearch: ['ok', 'empty', 'credential', 'unavailable', 'timeout', 'slow'],
+  flightBook: ['ok', 'no_availability', 'price_changed', 'rate_expired', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+  flightTicket: ['ok', 'price_changed', 'validation', 'pending', 'credential', 'unavailable', 'timeout', 'slow'],
+  flightCancel: ['ok', 'cancel_refused', 'credential', 'unavailable', 'timeout', 'slow'],
 };
 const PAYMENT_METHODS = { invoice: 'faturado', voucher: 'voucher', prepay: 'pré-pagamento', deposit: 'depósito', credit_card: 'cartão de crédito' };
 const BOOKING_WARNINGS = {
+  fare_changed: 'O parceiro reservou em outra família tarifária, ou outra base, que a pedida. A reserva existe: quem decide o que fazer com ela é você.',
+  ticket_unconfirmed: 'Uma emissão foi pedida e o parceiro não respondeu com clareza: os bilhetes podem existir. Consulte no parceiro.',
   price_changed_after_booking: 'O parceiro informou outro preço depois de reservar ou alterar.',
   penalty_above_max: 'O parceiro cobrou multa acima do máximo aceito.',
   vcn_update_failed: 'O emissor do cartão virtual não foi avisado da mudança da reserva (localizador, nova estadia ou novo limite). O cartão funciona.',
@@ -244,7 +250,7 @@ const stars = (n) => (n ? h('span', { class: 'stars', title: n + ' estrelas' }, 
 
 // ---------- rotas ----------
 
-const VIEWS = { hotel: viewHotel, reservas: viewBookings, seguro: viewInsurance, carros: viewCars, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
+const VIEWS = { hotel: viewHotel, reservas: viewBookings, seguro: viewInsurance, carros: viewCars, aereo: viewFlights, cartoes: viewCards, credenciais: viewCredentials, chaves: viewKeys, console: viewConsole, config: viewConfig };
 function tab() { return (location.hash.replace(/^#\//, '') || 'hotel').split('/')[0]; }
 async function render() {
   const name = VIEWS[tab()] ? tab() : 'hotel';
@@ -2054,6 +2060,317 @@ function supplierBookingModal(r) {
         h('div', { class: 'small muted' }, room.adults + ' adulto(s)' + (room.children ? ', ' + room.children + ' criança(s)' : '')),
         h('ul', { class: 'small' }, (room.guests || []).map((g) => h('li', {}, g.first_name + ' ' + g.last_name + (g.age !== undefined ? ' (' + g.age + ' anos)' : '')))))))),
     jsonBlock(r.body));
+}
+
+// ---------- aéreo (/v1/flights) ----------
+
+const FLIGHT_STATUS = { held: ['reservado', 'amber'], ticketing: ['emissão sem resposta', 'amber'], ticketed: ['emitido', 'green'], cancelled: ['cancelado', ''], expired: ['expirado', 'red'], unknown: ['não mapeado', ''] };
+const FLIGHT_CHARGES = { boarding_tax: 'taxa de embarque', fuel_surcharge: 'combustível', service_fee: 'taxa de serviço', fee: 'fee', rav: 'RAV', ob_fee: 'OB fee', consolidator_fee: 'taxa do consolidador', seat: 'assento', baggage: 'bagagem', unaccompanied_minor: 'menor desacompanhado', third_party_fee: 'repasse a terceiros', reissue_penalty: 'multa de reemissão' };
+const flightClock = (at) => { const [d, t] = String(at || '').split('T'); return d ? day(d) + ' ' + (t || '').slice(0, 5) : '—'; };
+const flightRoute = (slices) => ((slices || []).length ? [slices[0].origin].concat(slices.map((s) => s.destination)).join(' → ') : '—');
+const flightStatus = (s) => { const [label, color] = FLIGHT_STATUS[s] || [s, '']; return s ? badge(label, color) : null; };
+const flightParty = (p) => [p.adults ? p.adults + ' adulto(s)' : '', p.children ? p.children + ' criança(s)' : '', p.infants ? p.infants + ' bebê(s)' : ''].filter(Boolean).join(' · ');
+const flightBag = (b) => (b && b.included ? 'bagagem ' + [b.checked.pieces ? b.checked.pieces + '×' : '', b.checked.weight_kg ? b.checked.weight_kg + ' kg' : ''].join(' ').trim() : 'sem bagagem despachada');
+
+/** Os voos de um itinerário, como o parceiro os respondeu: relógio do aeroporto, sem fuso. */
+function flightSegments(slices) {
+  return h('div', { class: 'stack' }, (slices || []).map((s) => h('div', { class: 'small' }, h('strong', {}, s.origin + ' → ' + s.destination), s.duration_minutes ? ' · ' + s.duration_minutes + ' min' : '',
+    (s.segments || []).map((g) => h('div', { class: 'muted' }, h('span', { class: 'mono' }, g.marketing_carrier + ' ' + g.flight_number), ' ', g.origin, ' ', flightClock(g.departure_local), ' → ', g.destination, ' ', flightClock(g.arrival_local),
+      g.fare_family && g.fare_family.name ? ' · ' + g.fare_family.name : '', g.cabin ? ' · ' + g.cabin : '', g.booking_class ? ' · classe ' + g.booking_class : '', ' · ', flightBag(g.baggage),
+      g.connection_minutes ? ' · espera ' + g.connection_minutes + ' min' : '', g.status ? ' · ' + g.status : '', g.segment_id ? ' · linha ' + g.segment_id : '')))));
+}
+
+/** A tarifa por tipo de passageiro, linha a linha. Nada é somado aqui. */
+function flightFares(fares) {
+  return (fares || []).length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Passageiro', 'Qtd', 'Tarifa (por passageiro)', 'Linhas informadas'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, fares.map((f) => h('tr', {}, h('td', {}, f.passenger_type), h('td', {}, f.count), h('td', { class: 'nowrap' }, money(f.base), f.net_base ? h('div', { class: 'small muted' }, 'net ', money(f.net_base)) : null),
+      h('td', { class: 'small' }, (f.charges || []).map((c) => (FLIGHT_CHARGES[c.kind] || c.kind) + ' ' + money(c.amount)).join(' · ') || '—')))))) : h('p', { class: 'small muted' }, 'O parceiro não detalhou a tarifa por passageiro.');
+}
+
+/** Aéreo: busca, cotação, regras, reserva, e a lista do que foi reservado. */
+async function viewFlights() {
+  const st = (S.flights ||= { environment: (S.me && S.me.environment) || 'sandbox', items: [], cursor: null, loaded: false, found: null, out: null });
+  const partners = (await loadV1Integrations()).filter((i) => (i.credentials || []).some((c) => (c.allowed || []).some((a) => a.product === 'flight' && a.operations.includes('search'))));
+  const plus = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return iso(d); };
+  const integration = h('select', { name: 'integration', required: true }, partners.length ? partners.map((i) => opt(i.integration, i.integration)) : opt('', 'a chave não busca voo em nenhum parceiro'));
+  const origin = h('input', { value: 'GRU', required: true, name: 'origin', size: 5, maxlength: 3, autocomplete: 'off', spellcheck: 'false' });
+  const destination = h('input', { value: 'GIG', required: true, name: 'destination', size: 5, maxlength: 3, autocomplete: 'off', spellcheck: 'false' });
+  const going = h('input', { type: 'date', value: plus(30), required: true, name: 'date' });
+  const back = h('input', { type: 'date', value: plus(35), name: 'return_date', title: 'Vazio = só ida' });
+  const adults = h('input', { type: 'number', min: 0, max: 9, value: 1, name: 'adults', style: 'width:4rem' });
+  const children = h('input', { type: 'number', min: 0, max: 9, value: 0, name: 'children', style: 'width:4rem' });
+  const infants = h('input', { type: 'number', min: 0, max: 9, value: 0, name: 'infants', style: 'width:4rem' });
+  const combined = h('select', { name: 'combined', title: 'Ida e volta: o par com um preço só, ou cada sentido com o seu' }, opt('', 'o da credencial'), opt('false', 'por sentido'), opt('true', 'o par'));
+  const direct = h('input', { type: 'checkbox', name: 'direct_only' });
+  let scenario = 'ok';
+  const offersBox = h('div');
+  const listBox = h('div');
+
+  const card = (o, action) => h('div', { class: 'card' },
+    h('div', { class: 'head' },
+      h('div', {}, h('strong', {}, flightRoute(o.slices)), ' ', h('span', { class: 'mono small' }, o.validating_carrier || ''), o.private ? [' ', badge('negociada', 'amber')] : null,
+        h('div', { class: 'small muted' }, [o.source && o.source.name, o.source && o.source.ndc ? 'NDC' : ''].filter(Boolean).join(' · ')), flightSegments(o.slices)),
+      h('div', { class: 'right' }, h('strong', {}, money(o.total)), o.totals && o.totals.base ? h('div', { class: 'small muted' }, 'tarifa ', money(o.totals.base)) : null, o.totals && o.totals.taxes ? h('div', { class: 'small muted' }, 'taxas ', money(o.totals.taxes)) : null)),
+    h('div', { class: 'row' }, action), jsonBlock(o));
+  const drawOffers = () => {
+    const r = st.found;
+    if (!r) { put(offersBox); return; }
+    const warnings = (r.warnings || []).map((w) => h('div', { class: 'alert amber' }, 'Um sistema do parceiro não respondeu: ', w.source || '', ' ', w.code, w.message ? ' · ' + w.message : ''));
+    if ((r.outbound || []).length || (r.inbound || []).length) {
+      const pick = (o) => { st.out = o; drawOffers(); };
+      put(offersBox, warnings, h('div', { class: 'alert' }, 'O parceiro precificou cada sentido. Escolha uma ida e depois uma volta: a cotação leva um rate_token de cada. Companhias diferentes são duas reservas.',
+        st.out ? [' Ida escolhida: ', h('strong', {}, flightRoute(st.out.slices) + ' ' + money(st.out.total)), ' ', h('button', { onclick: () => { st.out = null; drawOffers(); } }, 'trocar'), ' ', h('button', { onclick: () => flightQuoteForm(st.out, null, reloadList) }, 'cotar só a ida')] : null),
+      h('h2', { class: 'stitle' }, ic('send'), st.out ? 'Volta' : 'Ida'),
+      h('div', { class: 'stack' }, (st.out ? r.inbound : r.outbound).slice(0, 60).map((o) => card(o, st.out
+        ? h('button', { class: 'primary', onclick: () => flightQuoteForm(st.out, o, reloadList) }, ic('calculator'), 'Cotar o par e reservar')
+        : h('button', { class: 'primary', onclick: () => pick(o) }, ic('check'), 'Escolher esta ida')))));
+      return;
+    }
+    put(offersBox, warnings, (r.results || []).length ? h('div', { class: 'stack' }, r.results.slice(0, 60).map((o) => card(o, h('button', { class: 'primary', onclick: () => flightQuoteForm(o, null, reloadList) }, ic('calculator'), 'Cotar e reservar'))))
+      : h('div', { class: 'card empty' }, emptyMark(), 'O parceiro não tem voo nessas datas.'));
+  };
+  const search = async (e) => {
+    e.preventDefault();
+    const slices = [{ origin: origin.value.trim().toUpperCase(), destination: destination.value.trim().toUpperCase(), date: going.value }];
+    if (back.value) slices.push({ origin: slices[0].destination, destination: slices[0].origin, date: back.value });
+    const body = { integration: integration.value, slices, passengers: { adults: +adults.value || 0, children: +children.value || 0, infants: +infants.value || 0 } };
+    if (combined.value) body.combined = combined.value === 'true';
+    if (direct.checked) body.direct_only = true;
+    const r = await api('POST', '/v1/flights/search', { body, headers: scenarioHeader(scenario), label: 'buscar voos' });
+    st.out = null;
+    if (!ok(r)) { st.found = null; put(offersBox, errorBox(r, 'Busca')); return; }
+    st.found = r.body;
+    drawOffers();
+  };
+  const pnrs = (e) => busy(e.target, async () => {
+    const to = new Date(); const from = new Date(to.getTime() - 7 * 864e5);
+    const r = await api('GET', '/v1/flights/supplier-bookings', { query: { integration: integration.value, created_from: from.toISOString(), created_to: to.toISOString() }, label: 'localizadores no parceiro' });
+    if (!ok(r)) { put(offersBox, errorBox(r, 'Localizadores no parceiro')); return; }
+    put(offersBox, h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('list', 'Localizadores em ' + r.body.integration + ' (' + r.body.supplier_bookings.length + ')'), h('p', { class: 'muted' }, 'Criados nos últimos 7 dias, quem quer que os tenha feito. Só leitura: nenhum vira reserva do Connect.'))),
+      h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Localizador', 'Estado', 'Cia', 'Criado', 'Embarque', 'Prazo', 'Total'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, r.body.supplier_bookings.map((b) => h('tr', {}, h('td', { class: 'mono' }, b.locator), h('td', {}, flightStatus(b.status), b.supplier_status ? h('div', { class: 'small muted' }, b.supplier_status) : null), h('td', {}, b.airline || '—'),
+          h('td', { class: 'nowrap' }, b.created_at ? when(b.created_at) : '—'), h('td', { class: 'nowrap' }, flightClock(b.departure_local)), h('td', { class: 'nowrap' }, b.ticketing_deadline ? when(b.ticketing_deadline) : '—'), h('td', { class: 'nowrap' }, b.total ? money(b.total) : '—'))))))));
+  });
+
+  const load = async (more) => {
+    const r = await api('GET', '/v1/management/flight-bookings', { query: { environment: st.environment, cursor: more ? st.cursor : undefined, limit: 50 }, label: 'reservas de voo' });
+    if (!ok(r)) { put(listBox, errorBox(r)); return; }
+    st.items = more ? st.items.concat(r.body.data) : r.body.data;
+    st.cursor = r.body.next_cursor || null;
+    st.loaded = true;
+    drawList();
+  };
+  const reloadList = () => load();
+  const openOne = (b) => flightModal(b, reloadList);
+  const drawList = () => put(listBox, st.items.length ? h('div', { class: 'tablewrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Criada', 'Estado', 'Viagem', 'Partida', 'Parceiro', 'Localizador', 'Total'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, st.items.map((b) => h('tr', { class: 'click', tabindex: 0, onclick: () => openOne(b), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openOne(b); } } },
+      h('td', { class: 'nowrap' }, when(b.created_at)), h('td', {}, badge(b.status), ' ', flightStatus(b.flight_status)),
+      h('td', { class: 'nowrap mono' }, flightRoute(b.slices), h('div', { class: 'small muted' }, flightParty(b.passengers))),
+      h('td', { class: 'nowrap' }, flightClock(((b.slices[0] || {}).segments || [{}])[0].departure_local)),
+      h('td', {}, b.integration), h('td', {}, h('span', { class: 'mono' }, b.locator || '—'), h('div', { class: 'small muted' }, b.reference || '')),
+      h('td', { class: 'nowrap' }, money(b.total || b.quoted_total)))))),
+  st.cursor ? h('button', { onclick: (e) => busy(e.target, () => load(true)) }, 'Carregar mais') : null) : h('div', { class: 'empty' }, emptyMark(), 'Nenhuma reserva de voo neste ambiente.'));
+
+  const byId = h('input', { placeholder: '01a1cd35-…', class: 'mono', size: 38, name: 'booking_id', spellcheck: 'false', autocomplete: 'off', required: true });
+  const openById = async (e) => {
+    e.preventDefault();
+    const r = await api('GET', '/v1/flights/bookings/' + byId.value.trim(), { label: 'consultar voo' });
+    if (ok(r)) openOne(r.body.booking); else openModal(errorBox(r, 'Reserva de voo'));
+  };
+
+  if (!st.loaded) load(); else drawList();
+  drawOffers();
+  return h('div', {},
+    h('div', { class: 'card' }, h('div', { class: 'head' }, h('div', {}, title('send', 'Aéreo'),
+      h('p', { class: 'muted' }, 'Busca num parceiro as ofertas de uma viagem. O Connect não filtra, não ordena, não soma e não converte: toda oferta que o parceiro responde aparece, com a tarifa linha a linha e os totais dele. Reservar não é emitir. A única conferência é se o total mudou antes de reservar e antes de emitir.'))),
+    h('form', { class: 'row', onsubmit: (e) => busy(e.submitter, () => search(e)) },
+      field('Parceiro', integration), field('Origem', origin), field('Destino', destination), field('Ida', going), field('Volta', back),
+      field('Adultos', adults), field('Crianças', children), field('Bebês', infants), field('Ida e volta', combined), field('Só direto', direct),
+      field('Cenário', scenarioSelect('flightSearch', 'ok', (v) => { scenario = v; })),
+      h('button', { class: 'primary' }, ic('search'), 'Buscar voos'),
+      h('button', { type: 'button', onclick: pnrs }, ic('list'), 'Localizadores no parceiro'))),
+    offersBox,
+    h('div', { class: 'card' }, h('div', { class: 'head' },
+      h('div', {}, title('list', 'Reservas de voo'), h('p', { class: 'muted' }, 'A lista vem da API de gestão (/v1/management/flight-bookings). Uma reserva não leva nome, documento nem contato de ninguém: um bilhete diz o passageiro pela posição.')),
+      h('div', { class: 'row' },
+        field('Ambiente', h('select', { onchange: (e) => { st.environment = e.target.value; load(); } }, opt('sandbox', 'sandbox', st.environment === 'sandbox'), opt('production', 'production', st.environment === 'production'))),
+        h('form', { class: 'row', onsubmit: openById }, field('Abrir por id (/v1/flights/bookings)', byId), h('button', {}, 'Abrir')))),
+    listBox));
+}
+
+/** Cotar uma oferta (ou uma ida com uma volta), ver as regras da tarifa e reservar. */
+async function flightQuoteForm(rate, inbound, reload) {
+  const body = openModal();
+  const out = h('div');
+  const tokens = { rate_token: rate.rate_token };
+  if (inbound) tokens.inbound_rate_token = inbound.rate_token;
+  const r = await api('POST', '/v1/flights/quote', { body: tokens, label: 'cotar voo' });
+  if (!ok(r)) { frame(body, title('calculator', 'Cotar voo'), errorBox(r, 'Cotação')); titleModal(body); return; }
+  const offer = r.body.offer;
+  const party = offer.fares.reduce((n, f) => Object.assign(n, { [f.passenger_type]: f.count }), {});
+  const people = [];
+  const names = ['Marina', 'Rui', 'Bia', 'Caio', 'Lia', 'Teo', 'Ana', 'Ivo', 'Eva'];
+  ['ADT', 'CHD', 'INF'].forEach((type) => { for (let i = 0; i < (party[type] || 0); i++) people.push({ type }); });
+  let adult = 0;
+  const rows = people.map((p, i) => {
+    p.first = h('input', { value: names[i % names.length], required: true, maxlength: 60, size: 10, autocomplete: 'off', 'aria-label': 'Nome do passageiro ' + (i + 1) });
+    p.last = h('input', { value: 'Souza Lima', required: true, maxlength: 60, size: 12, autocomplete: 'off', 'aria-label': 'Sobrenome do passageiro ' + (i + 1) });
+    p.born = h('input', { type: 'date', value: p.type === 'ADT' ? '1988-04-12' : p.type === 'CHD' ? '2018-07-01' : iso(new Date(Date.now() - 300 * 864e5)), 'aria-label': 'Nascimento do passageiro ' + (i + 1) });
+    p.doc = h('input', { value: p.type === 'ADT' ? '52998224725' : '', size: 13, inputmode: 'numeric', autocomplete: 'off', title: 'CPF de exemplo, válido só no formato', 'aria-label': 'CPF do passageiro ' + (i + 1) });
+    p.of = p.type === 'INF' ? adult++ : null; // o bebê viaja com o adulto dessa posição (os adultos vêm primeiro)
+    return h('div', { class: 'row' }, badge(p.type), p.first, p.last, p.born, p.doc, p.type === 'INF' ? h('span', { class: 'small muted' }, 'com o adulto ' + (p.of + 1)) : null);
+  });
+  const email = h('input', { type: 'email', value: 'pessoa@example.com', size: 22, autocomplete: 'off', name: 'email' });
+  const phone = h('input', { value: '5511987654321', size: 14, inputmode: 'numeric', autocomplete: 'off', name: 'phone' });
+  const reference = h('input', { value: 'SDK-AIR-' + Date.now().toString(36).toUpperCase(), maxlength: 64, name: 'reference', spellcheck: 'false', autocomplete: 'off' });
+  const key = h('input', { value: uuid(), class: 'mono', size: 38, name: 'idempotency_key', spellcheck: 'false', autocomplete: 'off', translate: 'no' });
+  const slack = h('input', { value: '', placeholder: '0.00', size: 6, inputmode: 'decimal', name: 'max_price_increase_percent', autocomplete: 'off', title: 'Aumento do total aceito sem nova pergunta, em %' });
+  let scenario = 'ok';
+  let token = offer.offer_token;
+  const rules = (e) => busy(e.target, async () => {
+    const x = await api('POST', '/v1/flights/fare-rules', { body: { offer_token: token }, label: 'regras da tarifa' });
+    if (!ok(x)) { put(out, errorBox(x, 'Regras da tarifa')); return; }
+    put(out, h('div', { class: 'card' }, h('strong', {}, 'Regras da tarifa', x.body.family ? ' · ' + (x.body.family.name || x.body.family.code) : ''),
+      h('p', { class: 'small muted' }, 'Como o parceiro as tem. O Connect não lê multa nem prazo de dentro do texto.'),
+      x.body.family ? h('div', { class: 'stack' }, x.body.family.features.map((f) => h('div', { class: 'small' }, h('strong', {}, f.name), ' ', badge(f.status), f.description ? ' ' + f.description : ''))) : null,
+      x.body.text ? h('pre', { class: 'small' }, x.body.text) : null));
+  });
+  const book = (e) => busy(e.target, async () => {
+    const booking = { offer_token: token, reference: reference.value,
+      passengers: people.map((p, i) => ({ type: p.type, first_name: p.first.value, last_name: p.last.value, birth_date: p.born.value || undefined,
+        document: p.doc.value ? { kind: 'cpf', number: p.doc.value } : undefined, email: i === 0 ? email.value || undefined : undefined, phone: i === 0 ? phone.value || undefined : undefined,
+        infant_of: p.of === null ? undefined : p.of })),
+      contact: { name: 'SDK', email: email.value || undefined, phone: phone.value || undefined } };
+    if (slack.value.trim()) booking.accept_changes = { max_price_increase_percent: slack.value.trim() };
+    const x = await api('POST', '/v1/flights/bookings', { body: booking, headers: { 'Idempotency-Key': key.value, ...scenarioHeader(scenario) }, label: 'reservar voo' });
+    if (ok(x)) { closeModal(); toast(x.status === 202 ? 'O parceiro não respondeu com clareza: reserva pendente' : x.status === 200 ? 'Reserva que já existia' : 'Voo reservado (ainda não emitido)'); flightModal(x.body.booking, reload); reload(); return; }
+    const changedOffer = x.body && x.body.error && x.body.error.offer;
+    if (changedOffer) {
+      // a única conferência do Connect: o total mudou. Quem decide reservar pelo total novo é quem chama
+      token = changedOffer.offer_token;
+      const c = (changedOffer.changes || [])[0] || {};
+      put(out, h('div', { class: 'alert amber' }, 'O parceiro agora cobra ', h('strong', {}, money(c.current)), ' (era ', money(c.previous), '). Nada foi reservado. Reservar de novo usa a oferta em vigor.'), errorBox(x, 'Reserva'));
+      key.value = uuid();
+      return;
+    }
+    put(out, errorBox(x, 'Reserva'));
+  });
+  const req = offer.requirements;
+  frame(body,
+    title('calculator', 'Cotar ', flightRoute(offer.slices)),
+    h('div', { class: 'alert ' + (r.body.changed ? 'amber' : '') }, 'Oferta: ', h('strong', {}, money(offer.total)), r.body.changed ? ' · o total é outro que o da busca' : '', ' · vale até ', when(offer.expires_at)),
+    req ? h('div', { class: 'small muted' }, 'O parceiro exige: ', [req.passenger_contact ? 'contato de cada passageiro' : '', req.passenger_document ? 'documento (' + (req.documents || []).join(', ') + ')' : ''].filter(Boolean).join(' · ') || 'nada além do nome') : null,
+    flightSegments(offer.slices), flightFares(offer.fares),
+    h('h2', { class: 'stitle' }, ic('user'), 'Passageiros'),
+    h('div', { class: 'stack' }, rows),
+    h('div', { class: 'row' }, field('E-mail', email), field('Telefone', phone)),
+    h('p', { class: 'small muted' }, 'O Connect só confere o formato e que as pessoas são as da cotação; o que a companhia exige (documento, idade, nome) é o parceiro que recusa. Nada dos passageiros é guardado.'),
+    h('div', { class: 'row' }, field('Referência', reference), field('Idempotency-Key', key), field('Aumento aceito (%)', slack), field('Cenário', scenarioSelect('flightBook', 'ok', (v) => { scenario = v; })),
+      h('button', { onclick: rules }, ic('list'), 'Regras da tarifa'),
+      h('button', { class: 'primary', onclick: book }, ic('check'), 'Reservar (segurar os assentos)')),
+    out, jsonBlock(offer));
+  titleModal(body);
+}
+
+/** Uma reserva de voo: o que o parceiro informou, e cada ato que o localizador aceita. */
+function flightModal(b, reload) {
+  const body = openModal();
+  const out = h('div');
+  const redraw = (next, note) => { closeModal(); flightModal(next, reload); if (note) toast(note); reload(); };
+  const path = '/v1/flights/bookings/' + b.id;
+  let scenario = 'ok';
+  const refresh = (e) => busy(e.target, async () => {
+    const r = await api('GET', path, { query: { refresh: 'true' }, label: 'consultar no parceiro' });
+    if (ok(r)) redraw(r.body.booking, r.body.booking.refreshed ? 'Lido agora no parceiro' : 'O parceiro não devolveu a reserva: mostrada como está guardada'); else put(out, errorBox(r, 'Consulta'));
+  });
+  const ticket = (e) => busy(e.target, async () => {
+    // o total esperado é o que a tela mostra: o do localizador quando o parceiro informou, senão o cotado
+    const r = await api('POST', path + '/ticket', { body: { payment: 'invoice', expected_total: b.total || b.quoted_total }, headers: scenarioHeader(scenario), label: 'emitir' });
+    if (ok(r)) { redraw(r.body.booking, r.body.booking.flight_status === 'ticketed' ? 'Bilhetes emitidos' : 'Emissão sem resposta conhecida: consulte no parceiro'); return; }
+    const now = r.body && r.body.error && r.body.error.current_total;
+    put(out, now ? h('div', { class: 'alert amber' }, 'O parceiro emitiria por ', h('strong', {}, money(now)), ' e a tela mostrava ', money(b.total || b.quoted_total), '. Nada foi emitido. Consulte no parceiro para ver o total em vigor e emita de novo.') : null, errorBox(r, 'Emissão'));
+  });
+  const cancel = (e) => {
+    if (!confirm('Cancelar o localizador ' + (b.locator || b.id) + ' no parceiro? Onde o parceiro faz assim, os bilhetes ativos são cancelados junto.')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', path + '/cancel', { body: {}, headers: scenarioHeader(scenario), label: 'cancelar voo' });
+      if (ok(r)) redraw(r.body.booking, 'Reserva cancelada'); else put(out, errorBox(r, 'Cancelamento'));
+    });
+  };
+  const receipt = (number) => (e) => busy(e.target, async () => {
+    const r = await api('GET', path + '/tickets/' + number, { label: 'ler bilhete' });
+    if (!ok(r)) { put(out, errorBox(r, 'Bilhete')); return; }
+    const t = r.body.ticket;
+    put(out, h('div', { class: 'card' }, h('strong', {}, 'Bilhete ', h('span', { class: 'mono' }, t.number), ' ', badge(t.status)), h('div', { class: 'small muted' }, 'Lido no parceiro; o Connect não guarda. ', t.passenger_name || ''),
+      (t.payments || []).map((p) => h('div', { class: 'small' }, p.text || p.kind, ' · tarifa ', money(p.base), (p.charges || []).map((c) => ' · ' + (FLIGHT_CHARGES[c.kind] || c.kind) + ' ' + money(c.amount)), p.total ? [' · total ', money(p.total)] : null)),
+      (t.coupons || []).map((c) => h('div', { class: 'small muted' }, c.number + '. ', h('span', { class: 'mono' }, (c.carrier || '') + ' ' + c.flight_number), ' ', c.origin, ' → ', c.destination, ' ', flightClock(c.departure_local), ' · ', c.status)), jsonBlock(t)));
+  });
+  const cancelTicket = (number) => (e) => {
+    if (!confirm('Cancelar o bilhete ' + number + ' no parceiro?')) return;
+    busy(e.target, async () => {
+      const r = await api('POST', path + '/tickets/' + number + '/cancel', { body: {}, label: 'cancelar bilhete' });
+      if (ok(r)) redraw(r.body.booking, 'Bilhete cancelado'); else put(out, errorBox(r, 'Cancelar bilhete'));
+    });
+  };
+  const bags = (e) => busy(e.target, async () => {
+    const r = await api('GET', path + '/ancillaries', { label: 'serviços à venda' });
+    if (!ok(r)) { put(out, errorBox(r, 'Bagagem')); return; }
+    const add = (item) => (ev) => busy(ev.target, async () => {
+      const x = await api('POST', path + '/ancillaries', { body: { availability_id: r.body.availability_id, ids: [item.id] }, label: 'colocar bagagem' });
+      if (ok(x)) { toast('Colocada no localizador. O total novo vem na consulta ao parceiro.'); ev.target.disabled = true; } else put(out, errorBox(x, 'Bagagem'));
+    });
+    put(out, h('div', { class: 'card' }, h('strong', {}, 'À venda agora no localizador'), h('p', { class: 'small muted' }, 'O Connect não soma ao total da reserva: consulte no parceiro depois.'),
+      r.body.items.length ? h('div', { class: 'stack' }, r.body.items.map((it) => h('div', { class: 'row small' }, h('span', {}, it.name || it.code, ' · passageiro ' + (it.passenger_index + 1), ' · ', h('span', { class: 'mono' }, (it.carrier || '') + ' ' + (it.flight_number || '')), ' ', it.origin, ' → ', it.destination, ' · ', h('strong', {}, money(it.price))),
+        h('button', { onclick: add(it) }, 'Colocar')))) : h('div', { class: 'empty' }, 'O parceiro não vende serviço neste localizador.')));
+  });
+  const seats = (e) => busy(e.target, async () => {
+    const r = await api('GET', path + '/seats', { label: 'mapa de assentos' });
+    if (!ok(r)) { put(out, errorBox(r, 'Assentos')); return; }
+    const mark = (seg, row, st) => (ev) => busy(ev.target, async () => {
+      const x = await api('POST', path + '/seats', { body: { seats: [{ passenger_index: 0, segment_id: seg.segment_id, row: row.number, column: st.column, type: st.type, price: st.price }] }, label: 'marcar assento' });
+      if (ok(x)) toast('Assento ' + ((x.body.seats[0] || {}).seat || '') + ' marcado para o passageiro 1'); else put(out, errorBox(x, 'Assento'));
+    });
+    put(out, h('div', { class: 'card' }, h('strong', {}, 'Mapa de assentos'), h('p', { class: 'small muted' }, 'Clique num assento livre para marcá-lo para o passageiro 1, com o tipo e o preço que o mapa mostra. Pago está em destaque.'),
+      r.body.segments.map((seg) => h('div', { class: 'stack' }, h('div', { class: 'small' }, h('strong', {}, (seg.carrier || '') + ' ' + (seg.flight_number || '')), ' ', seg.origin, ' → ', seg.destination, ' · linha ', seg.segment_id),
+        (seg.cabins || []).map((cab) => h('div', { class: 'small mono' }, cab.rows.slice(0, 40).map((row) => h('div', {}, String(row.number).padStart(2, '0'), ' ', row.seats.map((s) =>
+          h('button', { disabled: !s.available, title: (s.type_name || '') + ' ' + money(s.price), class: s.payment_required ? 'primary' : '', style: 'min-width:2rem;padding:0 .25rem', onclick: mark(seg, row, s) }, s.column))))))))));
+  });
+  const held = b.status === 'confirmed' && b.flight_status !== 'ticketed' && b.flight_status !== 'cancelled';
+  frame(body,
+    title('send', 'Voo ', badge(b.status), ' ', flightStatus(b.flight_status), ' ', b.locator ? h('span', { class: 'mono', translate: 'no' }, b.locator) : ''),
+    h('div', { class: 'sub' }, h('span', {}, ic('link'), ' ', b.integration), h('span', {}, ic('send'), ' ', flightRoute(b.slices)), h('span', {}, ic('wallet'), ' ', money(b.total || b.quoted_total))),
+    (b.warnings || []).map((w) => h('div', { class: 'alert amber' }, BOOKING_WARNINGS[w] || w)),
+    b.flight_status === 'ticketing' ? h('div', { class: 'alert amber' }, 'Uma emissão foi pedida e a resposta não é conhecida. O Connect não emite de novo: consulte no parceiro.') : null,
+    b.failure ? h('div', { class: 'alert red' }, 'Não reservada: ', b.failure.code, b.failure.supplier_message ? ' · ' + [b.failure.supplier_code, b.failure.supplier_message].filter(Boolean).join(' ') : '') : null,
+    h('dl', { class: 'kv' },
+      h('dt', {}, 'id'), h('dd', { class: 'mono' }, b.id),
+      h('dt', {}, 'Parceiro'), h('dd', {}, b.integration + ' · ', h('span', { class: 'mono' }, b.credential), b.source && b.source.name ? ' · ' + b.source.name : ''),
+      h('dt', {}, 'Referência'), h('dd', {}, b.reference || '—'),
+      h('dt', {}, 'Passageiros'), h('dd', {}, flightParty(b.passengers)),
+      h('dt', {}, 'Total cotado'), h('dd', {}, money(b.quoted_total)),
+      b.total ? [h('dt', {}, 'Total do localizador'), h('dd', {}, money(b.total))] : null,
+      b.ticketing_deadline ? [h('dt', {}, 'Prazo de emissão'), h('dd', {}, when(b.ticketing_deadline))] : null,
+      b.supplier_status ? [h('dt', {}, 'Estado no parceiro'), h('dd', { class: 'mono' }, b.supplier_status)] : null,
+      (b.airline_locators || []).length ? [h('dt', {}, 'Localizador na companhia'), h('dd', { class: 'mono' }, b.airline_locators.map((l) => (l.airline ? l.airline + ' ' : '') + l.locator).join(' · '))] : null,
+      typeof b.can_ticket === 'boolean' ? [h('dt', {}, 'O localizador aceita'), h('dd', {}, [b.can_ticket ? 'emissão' : '', b.can_cancel ? 'cancelamento' : '', b.can_reissue ? 'remarcação' : ''].filter(Boolean).join(' · ') || 'nada')] : null,
+      b.cancellation ? [h('dt', {}, 'Cancelada'), h('dd', {}, when(b.cancellation.cancelled_at) + ' · por ' + b.cancellation.by)] : null),
+    h('h2', { class: 'stitle' }, ic('send'), 'Voos'), flightSegments(b.slices),
+    h('h2', { class: 'stitle' }, ic('wallet'), 'Tarifa'), flightFares(b.fares),
+    h('h2', { class: 'stitle' }, ic('ticket'), 'Bilhetes'),
+    (b.tickets || []).length ? h('div', { class: 'stack' }, b.tickets.map((t) => h('div', { class: 'row small' }, h('span', { class: 'mono' }, t.number), badge(t.status), h('span', { class: 'muted' }, 'passageiro ' + (t.passenger_index + 1) + (t.infant ? ' (bebê)' : '')),
+      h('button', { onclick: receipt(t.number) }, 'Ler no parceiro'), t.status === 'open' ? h('button', { class: 'danger', onclick: cancelTicket(t.number) }, 'Cancelar bilhete') : null))) : h('div', { class: 'empty' }, 'Nenhum bilhete emitido.'),
+    h('h2', { class: 'stitle' }, ic('bolt'), 'Ações'),
+    h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, 'Cada ação é uma permissão da chave no produto flight (retrieve, ticket, cancel, cancel_ticket, ticket_receipt, ancillaries, seats). O Connect nunca emite nem cancela sozinho. Remarcação e crédito de bilhete (rebook, apply_credit) estão no cliente PHP e no Console.'),
+      h('div', { class: 'row' }, h('button', { onclick: refresh }, ic('refresh'), 'Consultar no parceiro'),
+        held ? [h('button', { onclick: bags }, ic('briefcase'), 'Bagagem'), h('button', { onclick: seats }, ic('th-large'), 'Assentos')] : null,
+        b.status === 'confirmed' ? field('Cenário', scenarioSelect(held ? 'flightTicket' : 'flightCancel', 'ok', (s) => { scenario = s; })) : null,
+        held ? h('button', { class: 'primary', onclick: ticket }, ic('ticket'), 'Emitir por ' + money(b.total || b.quoted_total)) : null,
+        b.status === 'confirmed' ? h('button', { class: 'danger', onclick: cancel }, ic('times-circle'), 'Cancelar a reserva') : null)),
+    out, jsonBlock(b));
+  titleModal(body);
 }
 
 // ---------- requisição e resposta ----------

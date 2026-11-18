@@ -39,6 +39,12 @@ Abra `http://localhost:8300`. Tudo o que a API faz, pela tela:
   cancelar. O Connect não filtra oferta, não soma linha nem converte: mostra o total, as linhas e as marcas
   que a locadora respondeu (sob consulta, bloqueada, proteção exigida, `selections_in_total`); a única
   conferência é se o total mudou antes de reservar.
+- **Aéreo**: buscar voos (só ida ou ida e volta, como par ou por sentido), cotar, ler as regras da tarifa
+  e reservar; a lista das reservas de voo (API de gestão) e, em cada uma, consultar no parceiro, colocar
+  bagagem, marcar assento, emitir, ler e cancelar um bilhete e cancelar a reserva; os localizadores da conta
+  no parceiro. Reservar não é emitir. O Connect não filtra, não ordena nem soma: mostra a tarifa linha a
+  linha e os totais do parceiro; a única conferência é se o total mudou antes de reservar e antes de emitir.
+  Remarcação e crédito de bilhete estão no cliente (`flightRebook`, `flightApplyCredit`) e no Console.
 - **Cartões virtuais**: lista dos cartões da conta (API de gestão), com os que sobraram de reserva que não
   existe mais; emitir um cartão avulso (o número aparece uma única vez), consultar no emissor, atualizar
   limite e validade, cancelar pela chave de produto ou pela API de gestão.

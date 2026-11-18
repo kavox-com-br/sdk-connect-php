@@ -451,6 +451,224 @@ final class Client
         return $this->post('/v1/cars/bookings/' . rawurlencode($bookingId) . '/cancel', [], $idempotencyKey);
     }
 
+    // ---------- aéreo (/v1/flights) ----------
+
+    /**
+     * Busca voos numa integração. $trip: slices ([['origin' => 'GRU', 'destination' => 'GIG', 'date' => 'YYYY-MM-DD']],
+     * um trecho é só ida, dois espelhados são ida e volta) e passengers (adults, children, infants). Opcionais:
+     * cabin, direct_only, airlines, baggage, combined, corporate_client, max_results, credential, timeout_ms e
+     * exchange (booking_id, segment_ids), que torna a busca a disponibilidade de uma remarcação.
+     *
+     * Ida e volta vem como o parceiro precificou: results (o par, um preço só) ou outbound e inbound (cada
+     * sentido com o seu preço; a cotação recebe um rate_token de cada). O Connect não filtra, não ordena, não
+     * soma e não converte: a tarifa vem linha a linha (fares) com o total e os totals do parceiro. Horários são
+     * o relógio do aeroporto, sem fuso.
+     *
+     * @param array<string, mixed> $trip
+     * @return array<string, mixed>
+     */
+    public function flightSearch(string $integration, array $trip): array
+    {
+        return $this->post('/v1/flights/search', ['integration' => $integration] + $trip);
+    }
+
+    /**
+     * Cota uma oferta, na mesma família e na mesma classe. $rateToken é o de uma oferta de results ou de
+     * outbound; $inboundRateToken, o de uma de inbound da mesma busca. A resposta traz o offer_token da
+     * reserva e offer.requirements (o que o parceiro exige dos passageiros).
+     *
+     * Dois sentidos de companhias diferentes não são cotados juntos pelo parceiro (422 SUPPLIER_VALIDATION):
+     * cote e reserve cada sentido sozinho, uma reserva para cada.
+     *
+     * @return array<string, mixed>
+     */
+    public function flightQuote(string $rateToken, ?string $inboundRateToken = null): array
+    {
+        return $this->post('/v1/flights/quote', array_filter(['rate_token' => $rateToken, 'inbound_rate_token' => $inboundRateToken]));
+    }
+
+    /**
+     * As regras da tarifa de uma oferta: family.features (bagagem, reembolso, alteração, cada uma com o estado
+     * e o texto do parceiro) e text (o texto da companhia). Nenhuma multa é lida de dentro de texto: leia você.
+     * $token é um rate_token ou, com $fromQuote, o offer_token de uma cotação.
+     *
+     * @return array<string, mixed>
+     */
+    public function flightFareRules(string $token, ?string $inboundRateToken = null, bool $fromQuote = false): array
+    {
+        return $this->post('/v1/flights/fare-rules', array_filter([$fromQuote ? 'offer_token' : 'rate_token' => $token, 'inbound_rate_token' => $inboundRateToken]));
+    }
+
+    /**
+     * Reserva a oferta de uma cotação: o parceiro cria o localizador e segura os assentos até
+     * ticketing_deadline. Reservar não é emitir: os bilhetes saem em flightTicket(). $booking: offer_token,
+     * passengers (as pessoas da cotação, uma a uma: type ADT|CHD|INF, first_name, last_name e, conforme o
+     * parceiro, gender, birth_date, document {kind, number}, email, phone, loyalty; em INF, infant_of com a
+     * posição do adulto) e, opcionais, reference, contact, withhold_contact, tour_code, corporate,
+     * accept_changes.max_price_increase_percent.
+     *
+     * A única conferência do Connect é se o total mudou: 409 PRICE_CHANGED traz error.offer com o offer_token
+     * da oferta em vigor. Reserva feita em outra tarifa ou com outro total existe e vem marcada em warnings:
+     * o Connect não cancela. 202 = sem resposta clara: acompanhe por flightBooking(). Nada dos passageiros é
+     * guardado.
+     *
+     * @param array<string, mixed> $booking
+     * @return array<string, mixed>
+     */
+    public function flightBook(array $booking, string $idempotencyKey): array
+    {
+        return $this->post('/v1/flights/bookings', $booking, $idempotencyKey);
+    }
+
+    /** A reserva de voo; com $refresh, lida antes no parceiro (flight_status, total, bilhetes, prazo). @return array<string, mixed> */
+    public function flightBooking(string $bookingId, bool $refresh = false): array
+    {
+        return $this->get($this->flightPath($bookingId), $refresh ? ['refresh' => 'true'] : []);
+    }
+
+    /**
+     * Cancela o localizador no parceiro; onde capabilities.flight.cancel_voids_tickets, os bilhetes ativos vão
+     * junto. O Connect nunca cancela sozinho e não calcula valor devolvido.
+     *
+     * @return array<string, mixed>
+     */
+    public function flightCancel(string $bookingId): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/cancel', []);
+    }
+
+    /**
+     * Emite os bilhetes, faturado. $expectedTotal (['amount' => '1468.73', 'currency' => 'BRL']) é o total que
+     * você viu para o localizador: o `total` de flightBooking($id, true). Se o parceiro informar outro, nada é
+     * emitido: 409 PRICE_CHANGED com error.current_total. flight_status "ticketing" = emissão sem resposta
+     * conhecida: não emita de novo, leia a reserva com refresh.
+     *
+     * @param array{amount: string, currency: string} $expectedTotal
+     * @param array<string, mixed> $corporate
+     * @return array<string, mixed>
+     */
+    public function flightTicket(string $bookingId, array $expectedTotal, array $corporate = []): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/ticket', array_filter(['payment' => 'invoice', 'expected_total' => $expectedTotal, 'corporate' => $corporate]));
+    }
+
+    /** Um bilhete lido no parceiro: cupons, valores e pagamento. Traz o nome impresso; o Connect não guarda. @return array<string, mixed> */
+    public function flightTicketReceipt(string $bookingId, string $ticketNumber): array
+    {
+        return $this->get($this->flightPath($bookingId) . '/tickets/' . rawurlencode($ticketNumber));
+    }
+
+    /** Cancela um bilhete; o estado dele passa a ser o que o parceiro respondeu. @return array<string, mixed> */
+    public function flightCancelTicket(string $bookingId, string $ticketNumber): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/tickets/' . rawurlencode($ticketNumber) . '/cancel', []);
+    }
+
+    /** O que o parceiro vende agora no localizador (bagagem), com o availability_id das chamadas seguintes. @return array<string, mixed> */
+    public function flightAncillaries(string $bookingId): array
+    {
+        return $this->get($this->flightPath($bookingId) . '/ancillaries');
+    }
+
+    /** O total que o parceiro informa para os serviços escolhidos. @param list<string> $ids @return array<string, mixed> */
+    public function flightAncillariesQuote(string $bookingId, string $availabilityId, array $ids): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/ancillaries/quote', ['availability_id' => $availabilityId, 'ids' => $ids]);
+    }
+
+    /** Coloca os serviços no localizador; o parceiro cobra com a emissão. @param list<string> $ids @return array<string, mixed> */
+    public function flightAncillariesAdd(string $bookingId, string $availabilityId, array $ids): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/ancillaries', ['availability_id' => $availabilityId, 'ids' => $ids]);
+    }
+
+    /** Tira serviços do localizador. @param list<string> $ids @return array<string, mixed> */
+    public function flightAncillariesRemove(string $bookingId, array $ids): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/ancillaries/remove', ['ids' => $ids]);
+    }
+
+    /** O mapa de assentos de cada voo do localizador. @return array<string, mixed> */
+    public function flightSeatMap(string $bookingId): array
+    {
+        return $this->get($this->flightPath($bookingId) . '/seats');
+    }
+
+    /**
+     * Marca assentos. Cada um: passenger_index, segment_id, row, column e o type e o price que o mapa mostrou.
+     *
+     * @param list<array<string, mixed>> $seats
+     * @return array<string, mixed>
+     */
+    public function flightSeatsAssign(string $bookingId, array $seats): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/seats', ['seats' => $seats]);
+    }
+
+    /** Desmarca o assento de um passageiro em um voo. @return array<string, mixed> */
+    public function flightSeatRemove(string $bookingId, int $passengerIndex, string $segmentId): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/seats/remove', ['passenger_index' => $passengerIndex, 'segment_id' => $segmentId]);
+    }
+
+    /**
+     * O preço de trocar os bilhetes da reserva pelo itinerário de $rateToken (de uma busca feita com exchange
+     * para esta reserva). $segmentIds são os voos que saem. Cada valor é o que o parceiro informa: o Connect
+     * não calcula multa nem diferença.
+     *
+     * @param list<string> $segmentIds
+     * @return array<string, mixed>
+     */
+    public function flightRebookQuote(string $bookingId, string $rateToken, array $segmentIds, ?string $inboundRateToken = null): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/rebook/quote', array_filter(['rate_token' => $rateToken, 'inbound_rate_token' => $inboundRateToken, 'segment_ids' => $segmentIds]));
+    }
+
+    /**
+     * Troca o itinerário. No parceiro que reemite em um segundo ato a reserva volta "held": emita com
+     * flightTicket() em seguida.
+     *
+     * @param list<string> $segmentIds
+     * @return array<string, mixed>
+     */
+    public function flightRebook(string $bookingId, string $rateToken, array $segmentIds, ?string $inboundRateToken = null): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/rebook', array_filter(['rate_token' => $rateToken, 'inbound_rate_token' => $inboundRateToken, 'segment_ids' => $segmentIds]));
+    }
+
+    /**
+     * Paga parte de um localizador ainda não emitido com bilhetes não voados de outra reserva da conta.
+     *
+     * @param list<string> $tickets
+     * @return array<string, mixed>
+     */
+    public function flightApplyCredit(string $bookingId, string $creditBookingId, array $tickets): array
+    {
+        return $this->post($this->flightPath($bookingId) . '/credit', ['credit_booking_id' => $creditBookingId, 'tickets' => $tickets]);
+    }
+
+    /**
+     * Os localizadores da conta no parceiro criados numa janela (RFC 3339, até 31 dias), quem quer que os tenha
+     * feito. Só leitura: nenhum vira reserva do Connect.
+     *
+     * @return array<string, mixed>
+     */
+    public function flightSupplierBookings(string $integration, string $createdFrom, string $createdTo, ?string $credential = null): array
+    {
+        return $this->get('/v1/flights/supplier-bookings', array_filter(['integration' => $integration, 'credential' => $credential, 'created_from' => $createdFrom, 'created_to' => $createdTo]));
+    }
+
+    /** Um localizador lido no parceiro. @return array<string, mixed> */
+    public function flightSupplierBooking(string $integration, string $locator, ?string $credential = null): array
+    {
+        return $this->get('/v1/flights/supplier-bookings/' . rawurlencode($locator), array_filter(['integration' => $integration, 'credential' => $credential]));
+    }
+
+    private function flightPath(string $bookingId): string
+    {
+        return '/v1/flights/bookings/' . rawurlencode($bookingId);
+    }
+
     /**
      * Cota a alteração de uma reserva confirmada: como ela ficaria com outra estadia. Não muda nada. $rooms é a
      * ocupação inteira desejada, no mesmo número e ordem dos quartos reservados; para trocar só os nomes dos
